@@ -10,14 +10,26 @@ ROOT = Path(__file__).parent
 TEMPLATE = ROOT / "catalog_template.html"
 OUTPUT = ROOT / "nyc-rent-catalog-360-park-ave-south.html"
 FIELDS = (
-    "address", "area", "baths", "beds", "built", "listedAt", "notes", "ppsf", "price",
-    "scope", "source", "sqft", "streeteasy", "url", "verification", "yearSource",
-    "zillow",
+    "address", "area", "baths", "beds", "built", "commuteDate", "features", "listedAt",
+    "notes", "ppsf", "price", "source", "sqft", "streeteasy", "transitMinutes",
+    "url", "verification", "walkMinutes", "zillow",
 )
 
 
 def norm(address: str | None) -> str:
-    return re.sub(r"\s+", " ", (address or "").strip()).casefold()
+    value = re.sub(r"[^a-z0-9#]+", " ", (address or "").casefold())
+    value = re.sub(r"\s+(?:new york|brooklyn|queens|bronx|manhattan)\s+nyc?(?:\s+\d{5})?$", "", value)
+    for long, short in (("street", "st"), ("avenue", "ave"), ("boulevard", "blvd"), ("road", "rd"), ("place", "pl"), ("drive", "dr"), ("court", "ct"), ("lane", "ln"), ("terrace", "ter")):
+        value = re.sub(rf"\b{long}\b", short, value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def listing_address(row) -> str:
+    address = row["address"] or row["url"] or row["source_id"]
+    unit = row["unit"]
+    if unit and not re.search(rf"(?:#|(?:apt|unit|floor|ph)\s*#?)\s*{re.escape(unit)}$", address, re.I):
+        address = f"{address} #{unit}"
+    return address
 
 
 def nested(row, note: str | None = None) -> dict:
@@ -27,22 +39,38 @@ def nested(row, note: str | None = None) -> dict:
         "listedAt": row["listed_at"], "note": note,
     }
 
-
 def format_value(key: str, value: object) -> str:
     if key == "price":
         return f"${int(value):,}"
     return f"{value:g}" if isinstance(value, float) else str(value)
+def row_value(row, key: str, default=None):
+    return row[key] if key in row.keys() else default
+def raw_value(row, key: str, default=None):
+    try:
+        raw = json.loads(row["raw"] or "null")
+    except (KeyError, TypeError, json.JSONDecodeError):
+        return default
+    return raw.get(key, default) if isinstance(raw, dict) else default
+
+
+def source_features(row) -> dict[str, bool]:
+    value = raw_value(row, "features", {})
+    return value if isinstance(value, dict) else {}
+
 
 
 def scraped_row(rows: list, buildings: dict, hpd: dict) -> dict:
     street = next((row for row in rows if row["source"] == "streeteasy"), None)
     zillow = next((row for row in rows if row["source"] == "zillow"), None)
     primary = street or zillow
-    address = primary["address"] or primary["url"] or primary["source_id"]
+    address = listing_address(primary)
     building = buildings.get(primary["building_bbl"])
     report = hpd.get(primary["building_bbl"])
     price = street["price"] if street and street["price"] is not None else zillow["price"] if zillow else None
     listed = street["listed_at"] if street and street["listed_at"] else zillow["listed_at"] if zillow else None
+    commute_date = row_value(street, "commute_date") if street and row_value(street, "commute_date") else row_value(zillow, "commute_date") if zillow else None
+    walk_minutes = row_value(street, "walk_minutes") if street and row_value(street, "walk_minutes") is not None else row_value(zillow, "walk_minutes") if zillow else None
+    transit_minutes = row_value(street, "transit_minutes") if street and row_value(street, "transit_minutes") is not None else row_value(zillow, "transit_minutes") if zillow else None
     sqft = street["sqft"] if street and street["sqft"] is not None else zillow["sqft"] if zillow else None
     beds = street["beds"] if street and street["beds"] is not None else zillow["beds"] if zillow else None
     baths = street["baths"] if street and street["baths"] is not None else zillow["baths"] if zillow else None
@@ -60,7 +88,12 @@ def scraped_row(rows: list, buildings: dict, hpd: dict) -> dict:
         verification = "Exact both — discrepancy" if conflicts else "Exact both — values agree" if comparable else "Exact both — fields incomplete"
     else:
         verification = "StreetEasy only" if street else "Zillow only"
-    area = building["neighborhood"] if building else None
+    area = (building["neighborhood"] if building else None) or raw_value(primary, "areaName") or raw_value(primary, "area")
+    built = raw_value(primary, "built_year") or (row_value(building, "year_built") if building else None)
+    features = {
+        key: bool(source_features(street).get(key) or source_features(zillow).get(key))
+        for key in ("centralAir", "dishwasher", "washerDryer", "doorman", "elevator")
+    }
     notes = f"FIELD CONFLICT: {'; '.join(conflicts)}" if conflicts else ""
     if report:
         hpd_note = f"HPD: {report['violations_open']} open violations, {report['complaints_total']} complaints"
@@ -68,22 +101,14 @@ def scraped_row(rows: list, buildings: dict, hpd: dict) -> dict:
     source_note = notes if conflicts else None
     empty = {"price": None, "beds": None, "baths": None, "sqft": None, "url": None, "status": None, "listedAt": None, "note": None}
     return {
-        "address": address,
-        "area": area,
-        "baths": baths,
-        "beds": beds,
-        "built": None,
-        "listedAt": listed,
-        "notes": notes,
+        "address": address, "area": area, "baths": baths, "beds": beds, "built": built,
+        "commuteDate": commute_date, "features": features, "listedAt": listed, "notes": notes,
         "ppsf": round(price / sqft, 2) if price is not None and sqft else None,
         "price": price,
-        "scope": "Configured search area",
         "source": "StreetEasy" if street else "Zillow",
-        "sqft": sqft,
         "streeteasy": nested(street, source_note) if street else empty,
-        "url": primary["url"],
-        "verification": verification,
-        "yearSource": None,
+        "transitMinutes": transit_minutes, "url": primary["url"],
+        "verification": verification, "walkMinutes": walk_minutes,
         "zillow": nested(zillow, source_note) if zillow else empty,
     }
 
@@ -95,7 +120,7 @@ def build_rows() -> list[dict]:
         hpd = {row["bbl"]: row for row in conn.execute("SELECT * FROM hpd")}
     scraped: dict[str, list] = {}
     for row in listings:
-        scraped.setdefault(norm(row["address"]), []).append(row)
+        scraped.setdefault(norm(listing_address(row)), []).append(row)
     return [
         {key: scraped_row(rows, buildings, hpd).get(key) for key in FIELDS}
         for rows in scraped.values()

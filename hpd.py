@@ -16,6 +16,16 @@ def fetch(dataset: str, params: list[tuple[str, str]]) -> list[dict]:
     request = Request(url, headers={"User-Agent": "rentals/0.1"})
     with urlopen(request, timeout=30) as response:
         return json.load(response)
+PLUTO = "64uk-42ks"
+
+
+def pluto_year(bbl: str) -> int | None:
+    rows = fetch(
+        PLUTO,
+        [("$select", "yearbuilt"), ("$where", f"bbl = '{bbl}'"), ("$limit", "1")],
+    )
+    value = rows[0].get("yearbuilt") if rows else None
+    return int(value) if value else None
 
 
 def count(dataset: str, filters: list[tuple[str, str]], column: str) -> int:
@@ -107,6 +117,17 @@ def enrich() -> None:
                 "UPDATE listings SET building_bbl=? WHERE address=? AND building_bbl IS NULL",
                 (result["bbl"], row["address"]),
             )
+        conn.commit()
+        buildings = conn.execute(
+            "SELECT bbl FROM buildings WHERE year_built IS NULL"
+        ).fetchall()
+        for row in buildings:
+            year = pluto_year(row["bbl"])
+            if year:
+                conn.execute(
+                    "UPDATE buildings SET year_built=?, year_source=? WHERE bbl=?",
+                    (year, "NYC PLUTO", row["bbl"]),
+                )
         conn.commit()
 
         buildings = conn.execute(

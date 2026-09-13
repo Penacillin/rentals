@@ -91,6 +91,50 @@ class ScraperParserTests(unittest.TestCase):
         self.assertIn("Sq ft:", result["notes"])
         self.assertEqual(result["streeteasy"]["price"], 5000)
         self.assertEqual(result["zillow"]["price"], 5100)
+    def test_commute_route_selects_walk_and_transit_minutes(self):
+        import commute
+
+        payload = {
+            "plan": {
+                "itineraries": [
+                    {"duration": 1800, "transitTime": 0, "legs": [{"mode": "WALK"}]},
+                    {"duration": 2100, "transitTime": 1500, "legs": [{"mode": "SUBWAY", "transitLeg": True}]},
+                ]
+            }
+        }
+
+        self.assertEqual(commute.route_minutes(payload), (30, 35))
+
+    def test_listing_address_matches_building_and_unit_forms(self):
+        self.assertEqual(
+            build_catalog.norm(
+                build_catalog.listing_address(
+                    {"address": "185 York Street", "unit": "3B", "url": None, "source_id": "x"}
+                )
+            ),
+            build_catalog.norm("185 York St #3B"),
+        )
+
+    def test_streeteasy_detail_metadata_extracts_year_and_features(self):
+        year, features = scrape.detail_metadata(
+            """
+            <main><h2>About the building</h2>
+            <p>Central air Dishwasher Washer/dryer Doorman Elevator</p>
+            <p>2012 built</p></main>
+            """
+        )
+
+        self.assertEqual(year, 2012)
+        self.assertEqual(
+            features,
+            {
+                "centralAir": True,
+                "dishwasher": True,
+                "washerDryer": True,
+                "doorman": True,
+                "elevator": True,
+            },
+        )
 
     def test_zillow_units_expand_to_distinct_rows(self):
         html = (FIXTURES / "zillow-search.html").read_text(encoding="utf-8")

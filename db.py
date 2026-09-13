@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS buildings (
   neighborhood TEXT,
   lat REAL,
   lon REAL,
+  year_built INTEGER,
+  year_source TEXT,
   hpd_building_id TEXT,
   hpd_class TEXT,
   hpd_units INTEGER
@@ -70,6 +72,10 @@ CREATE TABLE IF NOT EXISTS listings (
   url TEXT,
   status TEXT,
   listed_at TEXT,
+  commute_date TEXT,
+  walk_minutes INTEGER,
+  transit_minutes INTEGER,
+  commute_fetched_at TEXT,
   scraped_at TEXT NOT NULL DEFAULT (datetime('now')),
   raw TEXT,
   PRIMARY KEY (source, source_id)
@@ -102,27 +108,45 @@ def connect() -> sqlite3.Connection:
 def init() -> None:
     with connect() as db:
         db.executescript(SCHEMA)
-        columns = {row["name"] for row in db.execute("PRAGMA table_info(listings)")}
-        if "listed_at" not in columns:
-            db.execute("ALTER TABLE listings ADD COLUMN listed_at TEXT")
+        for table, columns_to_add in (
+            ("listings", (
+                ("listed_at", "TEXT"),
+                ("commute_date", "TEXT"),
+                ("walk_minutes", "INTEGER"),
+                ("transit_minutes", "INTEGER"),
+                ("commute_fetched_at", "TEXT"),
+            )),
+            ("buildings", (
+                ("year_built", "INTEGER"),
+                ("year_source", "TEXT"),
+            )),
+        ):
+            columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+            for name, definition in columns_to_add:
+                if name not in columns:
+                    db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+        db.commit()
 
 
 def upsert_building(db: sqlite3.Connection, building: dict) -> None:
     db.execute(
         """INSERT INTO buildings
-        (bbl, bin, address, borough, neighborhood, lat, lon, hpd_building_id,
-         hpd_class, hpd_units)
-        VALUES (:bbl, :bin, :address, :borough, :neighborhood, :lat, :lon,
-                :hpd_building_id, :hpd_class, :hpd_units)
+        (bbl, bin, address, borough, neighborhood, lat, lon, year_built, year_source,
+         hpd_building_id, hpd_class, hpd_units)
+        VALUES (:bbl, :bin, :address, :borough, :neighborhood, :lat, :lon, :year_built,
+                :year_source, :hpd_building_id, :hpd_class, :hpd_units)
         ON CONFLICT(bbl) DO UPDATE SET
           bin=excluded.bin, address=excluded.address, borough=excluded.borough,
-          neighborhood=excluded.neighborhood, lat=excluded.lat, lon=excluded.lon,
+          neighborhood=COALESCE(excluded.neighborhood, buildings.neighborhood),
+          lat=excluded.lat, lon=excluded.lon,
+          year_built=COALESCE(excluded.year_built, buildings.year_built),
+          year_source=COALESCE(excluded.year_source, buildings.year_source),
           hpd_building_id=COALESCE(excluded.hpd_building_id, buildings.hpd_building_id),
           hpd_class=COALESCE(excluded.hpd_class, buildings.hpd_class),
           hpd_units=COALESCE(excluded.hpd_units, buildings.hpd_units)""",
         {key: building.get(key) for key in (
             "bbl", "bin", "address", "borough", "neighborhood", "lat", "lon",
-            "hpd_building_id", "hpd_class", "hpd_units",
+            "year_built", "year_source", "hpd_building_id", "hpd_class", "hpd_units",
         )},
     )
 
@@ -148,6 +172,23 @@ def upsert_listing(db: sqlite3.Connection, listing: Listing) -> None:
     )
 
 
+def upsert_commute(
+    db: sqlite3.Connection,
+    source: str,
+    source_id: str,
+    commute_date: str,
+    walk_minutes: int | None,
+    transit_minutes: int | None,
+) -> None:
+    db.execute(
+        """UPDATE listings
+        SET commute_date = ?, walk_minutes = ?, transit_minutes = ?,
+            commute_fetched_at = datetime('now')
+        WHERE source = ? AND source_id = ?""",
+        (commute_date, walk_minutes, transit_minutes, source, source_id),
+    )
+
+
 def upsert_hpd(db: sqlite3.Connection, report: dict) -> None:
     keys = (
         "bbl", "complaints_total", "complaints_open", "violations_open",
@@ -168,8 +209,6 @@ def upsert_hpd(db: sqlite3.Connection, report: dict) -> None:
           mgmt_agent=excluded.mgmt_agent, fetched_at=datetime('now')""",
         {key: report.get(key) for key in keys},
     )
-
-
 
 
 def main() -> None:

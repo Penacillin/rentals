@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
+from urllib.request import Request, urlopen
 
 from invisible_playwright import InvisiblePlaywright
 
@@ -28,6 +29,54 @@ def number(value: object) -> float | None:
 def integer(value: object) -> int | None:
     result = number(value)
     return int(result) if result is not None else None
+BUILT_YEAR_RE = re.compile(
+    r"(?:built(?:\s+in)?\s*:?\s*((?:18|19|20)\d{2})|((?:18|19|20)\d{2})\s+built)",
+    re.I,
+)
+FEATURE_PATTERNS = {
+    "centralAir": r"\bcentral\s+air\b",
+    "dishwasher": r"\bdishwasher\b",
+    "washerDryer": r"\bwasher\s*/\s*dryer\b|\bwasher\s+and\s+dryer\b",
+    "doorman": r"\bdoorman\b",
+    "elevator": r"\belevator\b",
+}
+
+
+def built_year(text: str) -> int | None:
+    match = BUILT_YEAR_RE.search(text)
+    return int(match.group(1) or match.group(2)) if match else None
+
+
+class _Text(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        self.parts.append(data)
+
+
+def detail_metadata(html: str) -> tuple[int | None, dict[str, bool]]:
+    parser = _Text()
+    parser.feed(html)
+    text = " ".join(parser.parts)
+    return built_year(text), {
+        name: bool(re.search(pattern, text, re.I))
+        for name, pattern in FEATURE_PATTERNS.items()
+    }
+
+
+def street_detail_metadata(url: str) -> tuple[int | None, dict[str, bool]]:
+    request = Request(url, headers={"User-Agent": "rentals/0.1"})
+    with urlopen(request, timeout=30) as response:
+        return detail_metadata(response.read().decode("utf-8", errors="replace"))
+
+
+def street_detail_metadata_page(page, url: str) -> tuple[int | None, dict[str, bool]] | None:
+    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    if captcha(page):
+        return None
+    return detail_metadata(page.locator("body").inner_text(timeout=10000))
 LISTING_DATE_KEYS = {
     "listedat", "listeddate", "datelisted", "dateposted", "datepostedstring",
     "timeonzillow", "daysonzillow", "listingdate", "dateonmarket", "dateadded", "daysonmarket",
@@ -341,6 +390,73 @@ def select_streeteasy_newest(page) -> bool:
         return True
     except Exception:
         return False
+def building_path(url: str) -> str:
+    parts = urlsplit(url).path.strip("/").split("/")
+    return "/" + "/".join(parts[:2]) if len(parts) >= 2 else urlsplit(url).path
+
+
+def enrich_streeteasy_years(rows: list[db.Listing], page=None) -> int:
+    metadata: dict[str, tuple[int | None, dict[str, bool]] | None] = {}
+    for row in rows:
+        if not row.url:
+            continue
+        path = building_path(row.url)
+        if path not in metadata:
+            try:
+                url = urljoin("https://streeteasy.com", path)
+                metadata[path] = street_detail_metadata_page(page, url) if page else street_detail_metadata(url)
+            except Exception:
+                metadata[path] = None
+        result = metadata[path]
+        if result:
+            year, features = result
+            row.raw = {
+                **(row.raw if isinstance(row.raw, dict) else {}),
+                "features": features,
+            }
+            if year:
+                row.raw.update({"built_year": year, "year_source": "StreetEasy building page"})
+    return sum(1 for result in metadata.values() if result and result[0])
+
+
+def enrich_saved_years(limit: int) -> int:
+    db.init()
+    with db.connect() as conn:
+        source_rows = conn.execute(
+            "SELECT * FROM listings WHERE source = 'streeteasy' ORDER BY source_id LIMIT ?",
+            (limit,),
+        ).fetchall()
+        rows = [
+            db.Listing(
+                source=row["source"],
+                source_id=row["source_id"],
+                address=row["address"],
+                unit=row["unit"],
+                building_bbl=row["building_bbl"],
+                price=row["price"],
+                beds=row["beds"],
+                baths=row["baths"],
+                sqft=row["sqft"],
+                url=row["url"],
+                status=row["status"],
+                listed_at=row["listed_at"],
+                raw=json.loads(row["raw"] or "null"),
+            )
+            for row in source_rows
+        ]
+        with browser_context(False) as context:
+            page = context.new_page()
+            enrich_streeteasy_years(rows, page)
+        for row in rows:
+            if isinstance(row.raw, dict) and ("built_year" in row.raw or "features" in row.raw):
+                conn.execute(
+                    "UPDATE listings SET raw = ? WHERE source = ? AND source_id = ?",
+                    (json.dumps(row.raw, ensure_ascii=False), row.source, row.source_id),
+                )
+        conn.commit()
+    return sum(1 for row in rows if isinstance(row.raw, dict) and row.raw.get("built_year"))
+
+
 
 
 
@@ -360,23 +476,23 @@ def scrape_streeteasy(limit: int, headless: bool) -> int:
         page.on("response", collect_api)
         for page_number in range(1, 51):
             if page_number > 1:
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(2000)
             api_rows.clear()
             api_responses.clear()
             url = config["search_url"] if page_number == 1 else f"{config['search_url']}&{config['page_param']}={page_number}"
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(500)
+            page.wait_for_timeout(2000)
             for _ in range(3):
                 if not captcha(page):
                     break
                 input("Solve captcha in browser window, then press Enter")
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(2000)
             if captcha(page):
                 raise RuntimeError("StreetEasy captcha unresolved; use --from-files DIR")
             response_start = len(api_responses)
             sort_selected = select_streeteasy_newest(page)
             if sort_selected:
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(2000)
             responses = api_responses[response_start:] if sort_selected and len(api_responses) > response_start else api_responses
             for response in responses:
                 try:
@@ -406,10 +522,14 @@ def scrape_streeteasy(limit: int, headless: bool) -> int:
                     if matches_search(row):
                         rows.append(row)
                         if len(rows) >= limit:
+                            enrich_streeteasy_years(rows[:limit], page)
                             return save(rows[:limit], "streeteasy")
             if not page_rows:
                 break
-    return save(rows[:limit], "streeteasy")
+    count = save(rows[:limit], "streeteasy")
+    if count:
+        enrich_saved_years(limit)
+    return count
 
 
 def zillow_url() -> str:
@@ -423,13 +543,13 @@ def scrape_zillow(limit: int, headless: bool) -> int:
         url = zillow_url()
         for page_number in range(50):
             if page_number:
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(2000)
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             for _ in range(3):
                 if not captcha(page):
                     break
                 input("Solve captcha in browser window, then press Enter")
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(2000)
             if captcha(page):
                 raise RuntimeError("Zillow captcha unresolved; use --from-files DIR")
             data = page.locator("#__NEXT_DATA__").inner_text()
@@ -462,8 +582,14 @@ def main() -> None:
         command.add_argument("--from-files")
         command.add_argument("--headless", action="store_true")
         command.set_defaults(source=source)
+    detail = sub.add_parser("enrich-years")
+    detail.add_argument("--limit", type=int, default=1000)
     args = parser.parse_args()
     db.init()
+    if args.source == "enrich-years":
+        count = enrich_saved_years(args.limit)
+        print(f"enriched {count} StreetEasy building years")
+        return
     if args.from_files:
         count = saved_files(args.source, args.from_files, args.limit)
     elif args.source == "streeteasy":
