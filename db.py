@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).parent
@@ -13,6 +14,22 @@ UNIT_RE = re.compile(
     re.IGNORECASE,
 )
 HASH_UNIT_RE = re.compile(r"\s+#([A-Za-z0-9-]+)\s*$")
+
+@dataclass(slots=True)
+class Listing:
+    source: str
+    source_id: str
+    address: str | None = None
+    unit: str | None = None
+    building_bbl: str | None = None
+    price: int | None = None
+    beds: float | None = None
+    baths: float | None = None
+    sqft: int | None = None
+    url: str | None = None
+    status: str | None = None
+    listed_at: str | None = None
+    raw: object = None
 
 
 def building_address(address: str | None) -> str:
@@ -52,6 +69,7 @@ CREATE TABLE IF NOT EXISTS listings (
   sqft INTEGER,
   url TEXT,
   status TEXT,
+  listed_at TEXT,
   scraped_at TEXT NOT NULL DEFAULT (datetime('now')),
   raw TEXT,
   PRIMARY KEY (source, source_id)
@@ -84,6 +102,9 @@ def connect() -> sqlite3.Connection:
 def init() -> None:
     with connect() as db:
         db.executescript(SCHEMA)
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(listings)")}
+        if "listed_at" not in columns:
+            db.execute("ALTER TABLE listings ADD COLUMN listed_at TEXT")
 
 
 def upsert_building(db: sqlite3.Connection, building: dict) -> None:
@@ -106,23 +127,23 @@ def upsert_building(db: sqlite3.Connection, building: dict) -> None:
     )
 
 
-def upsert_listing(db: sqlite3.Connection, listing: dict) -> None:
-    values = {key: listing.get(key) for key in (
+def upsert_listing(db: sqlite3.Connection, listing: Listing) -> None:
+    values = {key: getattr(listing, key) for key in (
         "source", "source_id", "address", "unit", "building_bbl", "price", "beds",
-        "baths", "sqft", "url", "status",
+        "baths", "sqft", "url", "status", "listed_at",
     )}
-    values["raw"] = json.dumps(listing.get("raw"), ensure_ascii=False)
+    values["raw"] = json.dumps(listing.raw, ensure_ascii=False)
     db.execute(
         """INSERT INTO listings
         (source, source_id, address, unit, building_bbl, price, beds, baths, sqft,
-         url, status, raw)
+         url, status, listed_at, raw)
         VALUES (:source, :source_id, :address, :unit, :building_bbl, :price, :beds,
-                :baths, :sqft, :url, :status, :raw)
+                :baths, :sqft, :url, :status, :listed_at, :raw)
         ON CONFLICT(source, source_id) DO UPDATE SET
           address=excluded.address, unit=excluded.unit, building_bbl=excluded.building_bbl,
           price=excluded.price, beds=excluded.beds, baths=excluded.baths,
           sqft=excluded.sqft, url=excluded.url, status=excluded.status,
-          scraped_at=datetime('now'), raw=excluded.raw""",
+          listed_at=excluded.listed_at, scraped_at=datetime('now'), raw=excluded.raw""",
         values,
     )
 

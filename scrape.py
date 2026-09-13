@@ -28,16 +28,47 @@ def number(value: object) -> float | None:
 def integer(value: object) -> int | None:
     result = number(value)
     return int(result) if result is not None else None
+LISTING_DATE_KEYS = {
+    "listedat", "listeddate", "datelisted", "dateposted", "datepostedstring",
+    "timeonzillow", "daysonzillow", "listingdate", "dateonmarket", "dateadded", "daysonmarket",
+}
 
 
-def matches_search(row: dict) -> bool:
-    if row["price"] is not None and not CONFIG["min_price"] <= row["price"] <= CONFIG["max_price"]:
+def listed_at(value: object) -> str | None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key.casefold() in LISTING_DATE_KEYS and isinstance(child, (str, int, float)):
+                return str(child)
+        for child in value.values():
+            result = listed_at(child)
+            if result:
+                return result
+    elif isinstance(value, list):
+        for child in value:
+            result = listed_at(child)
+            if result:
+                return result
+    return None
+
+
+def card_listed_at(text: str) -> str | None:
+    match = re.search(
+        r"\b(?:listed|posted)\s*:?\s*(today|yesterday|\d+\s+(?:hours?|days?|weeks?|months?)\s+ago|\d{1,2}/\d{1,2}/\d{2,4})\b",
+        text,
+        re.I,
+    )
+    return match.group(1) if match else None
+
+
+
+def matches_search(row: db.Listing) -> bool:
+    if row.price is not None and not CONFIG["min_price"] <= row.price <= CONFIG["max_price"]:
         return False
-    if row["beds"] is not None and row["beds"] not in CONFIG["beds"]:
+    if row.beds is not None and row.beds not in CONFIG["beds"]:
         return False
-    bounds = CONFIG.get(row["source"], {}).get("map_bounds")
+    bounds = CONFIG.get(row.source, {}).get("map_bounds")
     if bounds:
-        raw = row.get("raw") or {}
+        raw = row.raw or {}
         point = raw.get("latLong") or raw.get("geoPoint") or {}
         lat, lon = number(point.get("latitude")), number(point.get("longitude"))
         if lat is not None and lon is not None and not (
@@ -69,6 +100,7 @@ def card_values(text: str) -> dict:
         "beds": number(beds.group(1)) if beds else None,
         "baths": number(baths.group(1)) if baths else None,
         "sqft": integer(sqft.group(1)) if sqft else None,
+        "listed_at": card_listed_at(text),
     }
 
 
@@ -114,7 +146,7 @@ class _Cards(HTMLParser):
             self._anchor["text"].append(text)
 
 
-def _listing_from_card(card: dict, base_url: str = "https://streeteasy.com") -> dict | None:
+def _listing_from_card(card: dict, base_url: str = "https://streeteasy.com") -> db.Listing | None:
     links = card.get("links") or []
     link = links[0] if links else card.get("link")
     href = link.get("href") if isinstance(link, dict) else link
@@ -126,22 +158,23 @@ def _listing_from_card(card: dict, base_url: str = "https://streeteasy.com") -> 
     values = card_values(text)
     address = " ".join(link.get("text", [])) if isinstance(link, dict) else card.get("address")
     address = address.strip() or None
-    return {
-        "source": "streeteasy",
-        "source_id": urlsplit(url).path,
-        "address": address,
-        "unit": db.unit_from_address(address),
-        "price": values["price"],
-        "beds": values["beds"],
-        "baths": values["baths"],
-        "sqft": values["sqft"],
-        "url": url,
-        "status": "search-card",
-        "raw": card,
-    }
+    return db.Listing(
+        source="streeteasy",
+        source_id=urlsplit(url).path,
+        address=address,
+        unit=db.unit_from_address(address),
+        price=values["price"],
+        beds=values["beds"],
+        baths=values["baths"],
+        sqft=values["sqft"],
+        listed_at=values["listed_at"],
+        url=url,
+        status="search-card",
+        raw=card,
+    )
 
 
-def parse_streeteasy_html(html: str) -> list[dict]:
+def parse_streeteasy_html(html: str) -> list[db.Listing]:
     parser = _Cards()
     parser.feed(html)
     cards = parser.articles
@@ -150,7 +183,7 @@ def parse_streeteasy_html(html: str) -> list[dict]:
     return [row for card in cards if (row := _listing_from_card(card))]
 
 
-def parse_streeteasy_api(payload: dict) -> list[dict]:
+def parse_streeteasy_api(payload: dict) -> list[db.Listing]:
     search = (payload.get("data") or {}).get("searchRentals") or {}
     rows = []
     for edge in search.get("edges") or []:
@@ -166,19 +199,19 @@ def parse_streeteasy_api(payload: dict) -> list[dict]:
             if full is not None or half is not None
             else None
         )
-        rows.append({
-            "source": "streeteasy",
-            "source_id": str(node["id"]),
-            "address": address,
-            "unit": unit,
-            "price": integer(node.get("price") or node.get("totalMonthlyPrice")),
-            "beds": number(node.get("bedroomCount")),
-            "baths": baths,
-            "sqft": None,
-            "url": urljoin("https://streeteasy.com", node.get("urlPath") or ""),
-            "status": node.get("status") or "api-search",
-            "raw": node,
-        })
+        rows.append(db.Listing(
+            source="streeteasy",
+            source_id=str(node["id"]),
+            address=address,
+            unit=unit,
+            price=integer(node.get("price") or node.get("totalMonthlyPrice")),
+            beds=number(node.get("bedroomCount")),
+            baths=baths,
+            listed_at=listed_at(node),
+            url=urljoin("https://streeteasy.com", node.get("urlPath") or ""),
+            status=node.get("status") or "api-search",
+            raw=node,
+        ))
     return rows
 
 
@@ -230,33 +263,34 @@ def parse_zillow_html(html: str) -> list[dict]:
     return _zillow_items(json.loads("".join(parser.text)))
 
 
-def zillow_listing(item: dict, unit: dict | None = None, index: int = 0) -> dict:
+def zillow_listing(item: dict, unit: dict | None = None, index: int = 0) -> db.Listing:
     values = unit or item
     address = item.get("address") or item.get("streetAddress")
     url = item.get("detailUrl") or item.get("hdpUrl")
-    return {
-        "source": "zillow",
-        "source_id": f"{item['zpid']}:{index}" if unit is not None else str(item["zpid"]),
-        "address": address,
-        "unit": values.get("unit") or db.unit_from_address(item.get("addressStreet")),
-        "price": integer(values.get("price")),
-        "beds": number(values.get("beds")),
-        "baths": number(values.get("baths")),
-        "sqft": integer(values.get("area")),
-        "url": urljoin("https://www.zillow.com", url) if url else None,
-        "status": "search-list",
-        "raw": item,
-    }
+    return db.Listing(
+        source="zillow",
+        source_id=f"{item['zpid']}:{index}" if unit is not None else str(item["zpid"]),
+        address=address,
+        unit=values.get("unit") or db.unit_from_address(item.get("addressStreet")),
+        price=integer(values.get("price")),
+        beds=number(values.get("beds")),
+        baths=number(values.get("baths")),
+        sqft=integer(values.get("area")),
+        listed_at=listed_at(item),
+        url=urljoin("https://www.zillow.com", url) if url else None,
+        status="search-list",
+        raw=item,
+    )
 
 
-def zillow_listings(item: dict) -> list[dict]:
+def zillow_listings(item: dict) -> list[db.Listing]:
     units = item.get("units")
     if isinstance(units, list) and units:
         return [zillow_listing(item, unit, index) for index, unit in enumerate(units)]
     return [zillow_listing(item)]
 
 
-def save(rows: list[dict]) -> int:
+def save(rows: list[db.Listing]) -> int:
     with db.connect() as conn:
         for row in rows:
             db.upsert_listing(conn, row)
@@ -265,7 +299,7 @@ def save(rows: list[dict]) -> int:
 
 
 def saved_files(source: str, directory: str, limit: int) -> int:
-    rows: list[dict] = []
+    rows: list[db.Listing] = []
     for path in sorted(Path(directory).glob("*.html")):
         parsed = parse_streeteasy_html(path.read_text()) if source == "streeteasy" else [
             row for item in parse_zillow_html(path.read_text()) for row in zillow_listings(item)
@@ -299,15 +333,23 @@ def street_cards(page) -> list[dict]:
     return page.locator('a[href^="/building/"]').evaluate_all(
         """els => els.map(el => ({text: el.innerText, links: [{href: el.getAttribute('href'), text: [el.innerText]}]}))"""
     )
+def select_streeteasy_newest(page) -> bool:
+    try:
+        page.get_by_role("button", name=re.compile(r"sort", re.I)).click(timeout=3000)
+        page.get_by_text(re.compile(r"\bnewest\b", re.I)).first.click(timeout=3000)
+        return True
+    except Exception:
+        return False
+
 
 
 def scrape_streeteasy(limit: int, headless: bool) -> int:
     config = CONFIG["streeteasy"]
-    rows: list[dict] = []
+    rows: list[db.Listing] = []
     seen: set[str] = set()
     with browser_context(headless) as context:
         page = context.new_page()
-        api_rows: list[dict] = []
+        api_rows: list[db.Listing] = []
         api_responses = []
 
         def collect_api(response) -> None:
@@ -323,11 +365,6 @@ def scrape_streeteasy(limit: int, headless: bool) -> int:
             url = config["search_url"] if page_number == 1 else f"{config['search_url']}&{config['page_param']}={page_number}"
             page.goto(url, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(500)
-            for response in api_responses:
-                try:
-                    api_rows.extend(parse_streeteasy_api(response.json()))
-                except Exception:
-                    pass
             for _ in range(3):
                 if not captcha(page):
                     break
@@ -335,14 +372,34 @@ def scrape_streeteasy(limit: int, headless: bool) -> int:
                 page.wait_for_timeout(500)
             if captcha(page):
                 raise RuntimeError("StreetEasy captcha unresolved; use --from-files DIR")
+            api_rows.clear()
+            api_responses.clear()
+            if select_streeteasy_newest(page):
+                page.wait_for_timeout(500)
+            for response in api_responses:
+                try:
+                    api_rows.extend(parse_streeteasy_api(response.json()))
+                except Exception:
+                    pass
             cards = api_rows or street_cards(page)
+            if api_rows:
+                dom_ages = {}
+                for card in street_cards(page):
+                    dom_row = _listing_from_card(card)
+                    if dom_row and dom_row.listed_at:
+                        dom_ages[dom_row.source_id] = dom_row.listed_at
+                        if dom_row.address:
+                            dom_ages[dom_row.address] = dom_row.listed_at
+                for row in api_rows:
+                    if row.listed_at is None:
+                        row.listed_at = dom_ages.get(row.source_id) or dom_ages.get(row.address)
             if not cards:
                 break
             page_rows = []
             for card in cards:
                 row = card if api_rows else _listing_from_card(card)
-                if row and row["source_id"] not in seen:
-                    seen.add(row["source_id"])
+                if row and row.source_id not in seen:
+                    seen.add(row.source_id)
                     page_rows.append(row)
                     if matches_search(row):
                         rows.append(row)
@@ -354,11 +411,11 @@ def scrape_streeteasy(limit: int, headless: bool) -> int:
 
 
 def zillow_url() -> str:
-    # ponytail: stable rental landing page; query-state URLs trigger PerimeterX.
-    return "https://www.zillow.com/homes/for_rent/"
+    # ponytail: stable URL plus native newest sort; query-state URLs trigger PerimeterX.
+    return CONFIG["zillow"]["search_url"]
 
 def scrape_zillow(limit: int, headless: bool) -> int:
-    rows: list[dict] = []
+    rows: list[db.Listing] = []
     with browser_context(headless) as context:
         page = context.new_page()
         url = zillow_url()
@@ -379,12 +436,12 @@ def scrape_zillow(limit: int, headless: bool) -> int:
             if not items:
                 break
             before = len(rows)
-            seen = {row["source_id"] for row in rows}
+            seen = {row.source_id for row in rows}
             for item in items:
                 for row in zillow_listings(item):
-                    if row["source_id"] not in seen and matches_search(row):
+                    if row.source_id not in seen and matches_search(row):
                         rows.append(row)
-                        seen.add(row["source_id"])
+                        seen.add(row.source_id)
                     if len(rows) >= limit:
                         return save(rows[:limit])
             next_url = payload.get("props", {}).get("pageProps", {}).get("searchPageState", {}).get("cat1", {}).get("searchList", {}).get("pagination", {}).get("nextUrl")
