@@ -1,0 +1,8 @@
+[project]
+name = "rentals"
+version = "0.1.0"
+description = "NYC rental data pipeline"
+requires-python = ">=3.12"
+dependencies = [
+    "invisible-playwright>=0.14.0",
+]
