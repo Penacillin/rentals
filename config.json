@@ -4,8 +4,9 @@
   "max_price": 7000,
   "beds": [1, 2],
   "streeteasy": {
-    "search_url": "https://streeteasy.com/for-rent/nyc/price:-7000%7Carea:130,122,133",
-    "page_param": "page"
+    "search_url": "https://streeteasy.com/for-rent/nyc/price:-7000",
+    "page_param": "page",
+    "map_bounds": {"west": -74.06, "east": -73.90, "north": 40.80, "south": 40.65}
   },
   "zillow": {
     "map_bounds": {"west": -74.06, "east": -73.90, "north": 40.80, "south": 40.65}

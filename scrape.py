@@ -35,10 +35,11 @@ def matches_search(row: dict) -> bool:
         return False
     if row["beds"] is not None and row["beds"] not in CONFIG["beds"]:
         return False
-    if row["source"] == "zillow":
-        point = (row.get("raw") or {}).get("latLong") or {}
+    bounds = CONFIG.get(row["source"], {}).get("map_bounds")
+    if bounds:
+        raw = row.get("raw") or {}
+        point = raw.get("latLong") or raw.get("geoPoint") or {}
         lat, lon = number(point.get("latitude")), number(point.get("longitude"))
-        bounds = CONFIG["zillow"]["map_bounds"]
         if lat is not None and lon is not None and not (
             bounds["south"] <= lat <= bounds["north"] and bounds["west"] <= lon <= bounds["east"]
         ):
@@ -303,6 +304,7 @@ def street_cards(page) -> list[dict]:
 def scrape_streeteasy(limit: int, headless: bool) -> int:
     config = CONFIG["streeteasy"]
     rows: list[dict] = []
+    seen: set[str] = set()
     with browser_context(headless) as context:
         page = context.new_page()
         api_rows: list[dict] = []
@@ -336,14 +338,17 @@ def scrape_streeteasy(limit: int, headless: bool) -> int:
             cards = api_rows or street_cards(page)
             if not cards:
                 break
-            before = len(rows)
+            page_rows = []
             for card in cards:
                 row = card if api_rows else _listing_from_card(card)
-                if row and matches_search(row):
-                    rows.append(row)
-                    if len(rows) >= limit:
-                        return save(rows[:limit])
-            if len(rows) == before:
+                if row and row["source_id"] not in seen:
+                    seen.add(row["source_id"])
+                    page_rows.append(row)
+                    if matches_search(row):
+                        rows.append(row)
+                        if len(rows) >= limit:
+                            return save(rows[:limit])
+            if not page_rows:
                 break
     return save(rows[:limit])
 

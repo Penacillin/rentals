@@ -55,7 +55,7 @@ def scraped_row(rows: list, buildings: dict, hpd: dict) -> dict:
         "notes": notes,
         "ppsf": round(price / sqft, 2) if price is not None and sqft else None,
         "price": price,
-        "scope": "StreetEasy live",
+        "scope": "Configured search area",
         "source": "StreetEasy" if street else "Zillow",
         "sqft": sqft,
         "streeteasy": nested(street) if street else {"price": None, "beds": None, "baths": None, "sqft": None, "url": None, "status": None},
