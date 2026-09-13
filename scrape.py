@@ -290,8 +290,9 @@ def zillow_listings(item: dict) -> list[db.Listing]:
     return [zillow_listing(item)]
 
 
-def save(rows: list[db.Listing]) -> int:
+def save(rows: list[db.Listing], source: str) -> int:
     with db.connect() as conn:
+        conn.execute("DELETE FROM listings WHERE source = ?", (source,))
         for row in rows:
             db.upsert_listing(conn, row)
         conn.commit()
@@ -307,7 +308,7 @@ def saved_files(source: str, directory: str, limit: int) -> int:
         rows.extend(parsed)
         if len(rows) >= limit:
             break
-    return save(rows[:limit])
+    return save(rows[:limit], source)
 
 
 def captcha(page) -> bool:
@@ -372,11 +373,12 @@ def scrape_streeteasy(limit: int, headless: bool) -> int:
                 page.wait_for_timeout(500)
             if captcha(page):
                 raise RuntimeError("StreetEasy captcha unresolved; use --from-files DIR")
-            api_rows.clear()
-            api_responses.clear()
-            if select_streeteasy_newest(page):
+            response_start = len(api_responses)
+            sort_selected = select_streeteasy_newest(page)
+            if sort_selected:
                 page.wait_for_timeout(500)
-            for response in api_responses:
+            responses = api_responses[response_start:] if sort_selected and len(api_responses) > response_start else api_responses
+            for response in responses:
                 try:
                     api_rows.extend(parse_streeteasy_api(response.json()))
                 except Exception:
@@ -404,10 +406,10 @@ def scrape_streeteasy(limit: int, headless: bool) -> int:
                     if matches_search(row):
                         rows.append(row)
                         if len(rows) >= limit:
-                            return save(rows[:limit])
+                            return save(rows[:limit], "streeteasy")
             if not page_rows:
                 break
-    return save(rows[:limit])
+    return save(rows[:limit], "streeteasy")
 
 
 def zillow_url() -> str:
@@ -443,12 +445,12 @@ def scrape_zillow(limit: int, headless: bool) -> int:
                         rows.append(row)
                         seen.add(row.source_id)
                     if len(rows) >= limit:
-                        return save(rows[:limit])
+                        return save(rows[:limit], "zillow")
             next_url = payload.get("props", {}).get("pageProps", {}).get("searchPageState", {}).get("cat1", {}).get("searchList", {}).get("pagination", {}).get("nextUrl")
             if not next_url or len(rows) == before:
                 break
             url = urljoin("https://www.zillow.com", next_url)
-    return save(rows[:limit])
+    return save(rows[:limit], "zillow")
 
 
 def main() -> None:
