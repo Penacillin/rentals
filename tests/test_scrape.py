@@ -136,6 +136,74 @@ class ScraperParserTests(unittest.TestCase):
             },
         )
 
+    def test_streeteasy_detail_metadata_is_unit_specific(self):
+        rows = [
+            scrape.db.Listing(
+                source="streeteasy",
+                source_id="4a",
+                building_bbl="1001230001",
+                address="778 Madison Avenue #4A",
+                url="https://streeteasy.com/building/778-madison-avenue_new_york/4a",
+            ),
+            scrape.db.Listing(
+                source="streeteasy",
+                source_id="9ab",
+                building_bbl="1001230001",
+                address="778 Madison Avenue #9AB",
+                url="https://streeteasy.com/building/778-madison-avenue_new_york/9ab",
+            ),
+        ]
+        fixtures = {
+            rows[0].url: FIXTURES / "streeteasy-778-madison-4a.html",
+            rows[1].url: FIXTURES / "streeteasy-778-madison-9ab.html",
+        }
+
+        class Locator:
+            def __init__(self, page):
+                self.page = page
+
+            def inner_text(self, timeout=None):
+                return self.page.html
+
+            def wait_for(self, **kwargs):
+                return None
+
+            def count(self):
+                return 0
+
+        class Page:
+            def __init__(self):
+                self.html = ""
+                self.urls = []
+
+            def wait_for_timeout(self, _milliseconds):
+                pass
+
+            def goto(self, url, **kwargs):
+                self.urls.append(url)
+                self.html = fixtures[url].read_text(encoding="utf-8")
+
+            def title(self):
+                return "fixture"
+
+            def evaluate(self, _script):
+                return self.html
+
+            def get_by_role(self, _role):
+                return Locator(self)
+
+            def locator(self, _selector):
+                return Locator(self)
+        page = Page()
+        years = scrape.enrich_streeteasy_years(rows, page)
+
+        self.assertEqual(page.urls, [rows[0].url, rows[1].url])
+        self.assertEqual(years, {"1001230001": 1908})
+        self.assertNotIn("built_year", rows[0].raw)
+        self.assertNotIn("built_year", rows[1].raw)
+        self.assertFalse(rows[0].raw["features"]["washerDryer"])
+        self.assertTrue(rows[1].raw["features"]["washerDryer"])
+
     def test_zillow_units_expand_to_distinct_rows(self):
         html = (FIXTURES / "zillow-search.html").read_text(encoding="utf-8")
 

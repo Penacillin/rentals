@@ -16,6 +16,10 @@ import db
 ROOT = Path(__file__).parent
 CONFIG = json.loads((ROOT / "config.json").read_text())
 NUMBER = r"(-?\d+(?:\.\d+)?)"
+class CaptchaRequired(RuntimeError):
+    pass
+
+
 
 
 
@@ -73,10 +77,21 @@ def street_detail_metadata(url: str) -> tuple[int | None, dict[str, bool]]:
 
 
 def street_detail_metadata_page(page, url: str) -> tuple[int | None, dict[str, bool]] | None:
-    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    page.goto(url, wait_until="commit", timeout=15000)
     if captcha(page):
+        raise CaptchaRequired(f"StreetEasy CAPTCHA at {url}")
+    try:
+        text = page.get_by_role("main").inner_text(timeout=10000)
+    except Exception:
+        try:
+            page.locator("body").wait_for(state="attached", timeout=10000)
+            text = page.evaluate("document.body ? document.body.innerText : ''")
+        except Exception:
+            text = ""
+    if not text:
+        print(f"StreetEasy detail text unavailable: {url}")
         return None
-    return detail_metadata(page.locator("body").inner_text(timeout=10000))
+    return detail_metadata(text)
 LISTING_DATE_KEYS = {
     "listedat", "listeddate", "datelisted", "dateposted", "datepostedstring",
     "timeonzillow", "daysonzillow", "listingdate", "dateonmarket", "dateadded", "daysonmarket",
@@ -137,6 +152,18 @@ def browser_context(headless: bool):
         timezone="America/New_York",
     ) as context:
         yield context
+def goto_with_retries(page, url: str, label: str, attempts: int = 3) -> bool:
+    for attempt in range(1, attempts + 1):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            return True
+        except Exception as exc:
+            print(f"{label} navigation error {attempt}/{attempts}: {exc}")
+            if attempt < attempts:
+                page.wait_for_timeout(2000)
+    return False
+
+
 
 
 def card_values(text: str) -> dict:
@@ -341,7 +368,6 @@ def zillow_listings(item: dict) -> list[db.Listing]:
 
 def save(rows: list[db.Listing], source: str) -> int:
     with db.connect() as conn:
-        conn.execute("DELETE FROM listings WHERE source = ?", (source,))
         for row in rows:
             db.upsert_listing(conn, row)
         conn.commit()
@@ -362,7 +388,7 @@ def saved_files(source: str, directory: str, limit: int) -> int:
 
 def captcha(page) -> bool:
     title = page.title()
-    body = page.locator("body").inner_text(timeout=10000)
+    body = page.evaluate("document.body ? document.body.innerText : ''")
     return (
         "Access to this page has been denied" in title
         or "Access to this page has been denied" in body
@@ -390,33 +416,52 @@ def select_streeteasy_newest(page) -> bool:
         return True
     except Exception:
         return False
-def building_path(url: str) -> str:
-    parts = urlsplit(url).path.strip("/").split("/")
-    return "/" + "/".join(parts[:2]) if len(parts) >= 2 else urlsplit(url).path
 
 
-def enrich_streeteasy_years(rows: list[db.Listing], page=None) -> int:
+def enrich_streeteasy_years(rows: list[db.Listing], page=None, on_enriched=None) -> dict[str, int]:
     metadata: dict[str, tuple[int | None, dict[str, bool]] | None] = {}
+    years: dict[str, int] = {}
     for row in rows:
         if not row.url:
             continue
-        path = building_path(row.url)
-        if path not in metadata:
-            try:
-                url = urljoin("https://streeteasy.com", path)
-                metadata[path] = street_detail_metadata_page(page, url) if page else street_detail_metadata(url)
-            except Exception:
-                metadata[path] = None
-        result = metadata[path]
+        detail_url = urljoin("https://streeteasy.com", row.url)
+        if detail_url not in metadata:
+            metadata[detail_url] = None
+            attempt = 1
+            while True:
+                try:
+                    if page:
+                        page.wait_for_timeout(2000)
+                    result = (
+                        street_detail_metadata_page(page, detail_url)
+                        if page
+                        else street_detail_metadata(detail_url)
+                    )
+                    if result is not None:
+                        metadata[detail_url] = result
+                        print(f"StreetEasy detail {len(metadata)}: {detail_url}")
+                    else:
+                        print(f"StreetEasy detail unavailable {detail_url}; keeping metadata unchanged")
+                    break
+                except CaptchaRequired:
+                    input("Solve CAPTCHA in browser window, then press Enter")
+                except Exception as exc:
+                    print(f"StreetEasy detail error {detail_url} attempt {attempt}: {exc}")
+                    break
+                finally:
+                    attempt += 1
+        result = metadata[detail_url]
         if result:
             year, features = result
             row.raw = {
                 **(row.raw if isinstance(row.raw, dict) else {}),
                 "features": features,
             }
-            if year:
-                row.raw.update({"built_year": year, "year_source": "StreetEasy building page"})
-    return sum(1 for result in metadata.values() if result and result[0])
+            if year and row.building_bbl:
+                years[row.building_bbl] = year
+            if on_enriched:
+                on_enriched(row, year)
+    return years
 
 
 def enrich_saved_years(limit: int) -> int:
@@ -442,22 +487,30 @@ def enrich_saved_years(limit: int) -> int:
                 listed_at=row["listed_at"],
                 raw=json.loads(row["raw"] or "null"),
             )
-            for row in source_rows
         ]
-        with browser_context(False) as context:
-            page = context.new_page()
-            enrich_streeteasy_years(rows, page)
-        for row in rows:
-            if isinstance(row.raw, dict) and ("built_year" in row.raw or "features" in row.raw):
+        rows = [
+            row for row in rows
+            if not (isinstance(row.raw, dict) and "features" in row.raw)
+        ]
+
+        def persist(row, year):
+            if isinstance(row.raw, dict) and "features" in row.raw:
+                row.raw.pop("built_year", None)
                 conn.execute(
                     "UPDATE listings SET raw = ? WHERE source = ? AND source_id = ?",
                     (json.dumps(row.raw, ensure_ascii=False), row.source, row.source_id),
                 )
-        conn.commit()
-    return sum(1 for row in rows if isinstance(row.raw, dict) and row.raw.get("built_year"))
+            if row.building_bbl and year:
+                conn.execute(
+                    "UPDATE buildings SET year_built = ? WHERE bbl = ?",
+                    (year, row.building_bbl),
+                )
+            conn.commit()
 
-
-
+        with browser_context(False) as context:
+            page = context.new_page()
+            years = enrich_streeteasy_years(rows, page, persist)
+    return len(years)
 
 
 def scrape_streeteasy(limit: int, headless: bool) -> int:
@@ -480,7 +533,8 @@ def scrape_streeteasy(limit: int, headless: bool) -> int:
             api_rows.clear()
             api_responses.clear()
             url = config["search_url"] if page_number == 1 else f"{config['search_url']}&{config['page_param']}={page_number}"
-            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            if not goto_with_retries(page, url, f"StreetEasy page {page_number}"):
+                continue
             page.wait_for_timeout(2000)
             for _ in range(3):
                 if not captcha(page):
@@ -497,8 +551,8 @@ def scrape_streeteasy(limit: int, headless: bool) -> int:
             for response in responses:
                 try:
                     api_rows.extend(parse_streeteasy_api(response.json()))
-                except Exception:
-                    pass
+                except Exception as exc:
+                    print(f"StreetEasy API response parse error: {exc}")
             cards = api_rows or street_cards(page)
             if api_rows:
                 dom_ages = {}
@@ -522,14 +576,10 @@ def scrape_streeteasy(limit: int, headless: bool) -> int:
                     if matches_search(row):
                         rows.append(row)
                         if len(rows) >= limit:
-                            enrich_streeteasy_years(rows[:limit], page)
                             return save(rows[:limit], "streeteasy")
             if not page_rows:
                 break
-    count = save(rows[:limit], "streeteasy")
-    if count:
-        enrich_saved_years(limit)
-    return count
+    return save(rows[:limit], "streeteasy")
 
 
 def zillow_url() -> str:
@@ -544,7 +594,8 @@ def scrape_zillow(limit: int, headless: bool) -> int:
         for page_number in range(50):
             if page_number:
                 page.wait_for_timeout(2000)
-            page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            if not goto_with_retries(page, url, f"Zillow page {page_number + 1}"):
+                continue
             for _ in range(3):
                 if not captcha(page):
                     break
@@ -552,8 +603,12 @@ def scrape_zillow(limit: int, headless: bool) -> int:
                 page.wait_for_timeout(2000)
             if captcha(page):
                 raise RuntimeError("Zillow captcha unresolved; use --from-files DIR")
-            data = page.locator("#__NEXT_DATA__").inner_text()
-            payload = json.loads(data)
+            try:
+                data = page.locator("#__NEXT_DATA__").inner_text()
+                payload = json.loads(data)
+            except Exception as exc:
+                print(f"Zillow page {page_number + 1} parse error: {exc}")
+                continue
             items = _zillow_items(payload)
             if not items:
                 break

@@ -125,6 +125,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, help="maximum source rows; default all")
     parser.add_argument("--date", help="YYYY-MM-DD; default next weekday")
+    parser.add_argument("--refresh", action="store_true", help="replace existing building routes")
     args = parser.parse_args()
     api_key = dotenv_key()
     if not api_key:
@@ -152,18 +153,25 @@ def main() -> None:
             cached = next(
                 (
                     row for row in rows
-                    if row["commute_date"] == travel_date.isoformat()
+                    if row["commute_date"]
                     and (row["walk_minutes"] is not None or row["transit_minutes"] is not None)
                 ),
                 None,
             )
-            if cached:
-                return rows, (cached["walk_minutes"], cached["transit_minutes"]), None
+            if cached and not args.refresh:
+                return rows, (
+                    cached["walk_minutes"],
+                    cached["transit_minutes"],
+                    cached["commute_date"],
+                ), None
             origin = listing_coordinates(rows[0], buildings)
             if not origin:
                 return rows, None, f"{rows[0]['address']}: no coordinates"
             try:
-                return rows, route_minutes(plan(origin, destination, travel_date, api_key)), None
+                return rows, (
+                    *route_minutes(plan(origin, destination, travel_date, api_key)),
+                    travel_date.isoformat(),
+                ), None
             except Exception as error:
                 return rows, None, f"{rows[0]['address']}: {error}"
 
@@ -173,10 +181,10 @@ def main() -> None:
                 if error:
                     print(f"skipped {error}")
                     continue
-                walk, transit = result
+                walk, transit, commute_date = result
                 for row in rows:
                     db.upsert_commute(
-                        conn, row["source"], row["source_id"], travel_date.isoformat(), walk, transit
+                        conn, row["source"], row["source_id"], commute_date, walk, transit
                     )
                     done += 1
         conn.commit()

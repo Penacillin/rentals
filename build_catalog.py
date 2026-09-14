@@ -89,7 +89,7 @@ def scraped_row(rows: list, buildings: dict, hpd: dict) -> dict:
     else:
         verification = "StreetEasy only" if street else "Zillow only"
     area = (building["neighborhood"] if building else None) or raw_value(primary, "areaName") or raw_value(primary, "area")
-    built = raw_value(primary, "built_year") or (row_value(building, "year_built") if building else None)
+    built = row_value(building, "year_built") if building else None
     features = {
         key: bool(source_features(street).get(key) or source_features(zillow).get(key))
         for key in ("centralAir", "dishwasher", "washerDryer", "doorman", "elevator")
