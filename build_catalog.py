@@ -53,9 +53,23 @@ def raw_value(row, key: str, default=None):
     return raw.get(key, default) if isinstance(raw, dict) else default
 
 
+FEATURE_COLUMNS = {
+    "centralAir": "central_air",
+    "dishwasher": "dishwasher",
+    "washerDryer": "washer_dryer",
+    "doorman": "doorman",
+    "elevator": "elevator",
+}
+
+
 def source_features(row) -> dict[str, bool]:
-    value = raw_value(row, "features", {})
-    return value if isinstance(value, dict) else {}
+    if row is None:
+        return {}
+    return {
+        key: bool(row[column])
+        for key, column in FEATURE_COLUMNS.items()
+        if column in row.keys() and row[column] is not None
+    }
 
 
 

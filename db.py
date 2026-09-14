@@ -29,6 +29,7 @@ class Listing:
     url: str | None = None
     status: str | None = None
     listed_at: str | None = None
+    features: dict[str, bool] | None = None
     raw: object = None
 
 
@@ -76,6 +77,11 @@ CREATE TABLE IF NOT EXISTS listings (
   walk_minutes INTEGER,
   transit_minutes INTEGER,
   commute_fetched_at TEXT,
+  central_air INTEGER,
+  dishwasher INTEGER,
+  washer_dryer INTEGER,
+  doorman INTEGER,
+  elevator INTEGER,
   scraped_at TEXT NOT NULL DEFAULT (datetime('now')),
   raw TEXT,
   PRIMARY KEY (source, source_id)
@@ -115,6 +121,11 @@ def init() -> None:
                 ("walk_minutes", "INTEGER"),
                 ("transit_minutes", "INTEGER"),
                 ("commute_fetched_at", "TEXT"),
+                ("central_air", "INTEGER"),
+                ("dishwasher", "INTEGER"),
+                ("washer_dryer", "INTEGER"),
+                ("doorman", "INTEGER"),
+                ("elevator", "INTEGER"),
             )),
             ("buildings", (
                 ("year_built", "INTEGER"),
@@ -169,6 +180,28 @@ def upsert_listing(db: sqlite3.Connection, listing: Listing) -> None:
           sqft=excluded.sqft, url=excluded.url, status=excluded.status,
           listed_at=excluded.listed_at, scraped_at=datetime('now'), raw=excluded.raw""",
         values,
+    )
+
+
+def upsert_features(
+    db: sqlite3.Connection,
+    source: str,
+    source_id: str,
+    features: dict[str, bool],
+) -> None:
+    db.execute(
+        """UPDATE listings
+        SET central_air = ?, dishwasher = ?, washer_dryer = ?, doorman = ?, elevator = ?
+        WHERE source = ? AND source_id = ?""",
+        (
+            int(features["centralAir"]),
+            int(features["dishwasher"]),
+            int(features["washerDryer"]),
+            int(features["doorman"]),
+            int(features["elevator"]),
+            source,
+            source_id,
+        ),
     )
 
 

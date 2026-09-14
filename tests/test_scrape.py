@@ -195,14 +195,19 @@ class ScraperParserTests(unittest.TestCase):
             def locator(self, _selector):
                 return Locator(self)
         page = Page()
-        years = scrape.enrich_streeteasy_years(rows, page)
+        enriched = {}
+
+        def collect(row, year, features):
+            enriched[row.source_id] = (year, features)
+
+        years = scrape.enrich_streeteasy_years(rows, page, collect)
 
         self.assertEqual(page.urls, [rows[0].url, rows[1].url])
         self.assertEqual(years, {"1001230001": 1908})
-        self.assertNotIn("built_year", rows[0].raw)
-        self.assertNotIn("built_year", rows[1].raw)
-        self.assertFalse(rows[0].raw["features"]["washerDryer"])
-        self.assertTrue(rows[1].raw["features"]["washerDryer"])
+        self.assertIsNone(rows[0].raw)
+        self.assertIsNone(rows[1].raw)
+        self.assertFalse(enriched["4a"][1]["washerDryer"])
+        self.assertTrue(enriched["9ab"][1]["washerDryer"])
 
     def test_zillow_units_expand_to_distinct_rows(self):
         html = (FIXTURES / "zillow-search.html").read_text(encoding="utf-8")

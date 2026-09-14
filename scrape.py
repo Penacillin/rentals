@@ -453,14 +453,11 @@ def enrich_streeteasy_years(rows: list[db.Listing], page=None, on_enriched=None)
         result = metadata[detail_url]
         if result:
             year, features = result
-            row.raw = {
-                **(row.raw if isinstance(row.raw, dict) else {}),
-                "features": features,
-            }
+            row.features = features
             if year and row.building_bbl:
                 years[row.building_bbl] = year
             if on_enriched:
-                on_enriched(row, year)
+                on_enriched(row, year, features)
     return years
 
 
@@ -471,35 +468,42 @@ def enrich_saved_years(limit: int) -> int:
             "SELECT * FROM listings WHERE source = 'streeteasy' ORDER BY source_id LIMIT ?",
             (limit,),
         ).fetchall()
-        rows = [
-            db.Listing(
-                source=row["source"],
-                source_id=row["source_id"],
-                address=row["address"],
-                unit=row["unit"],
-                building_bbl=row["building_bbl"],
-                price=row["price"],
-                beds=row["beds"],
-                baths=row["baths"],
-                sqft=row["sqft"],
-                url=row["url"],
-                status=row["status"],
-                listed_at=row["listed_at"],
-                raw=json.loads(row["raw"] or "null"),
-            )
-        ]
-        rows = [
-            row for row in rows
-            if not (isinstance(row.raw, dict) and "features" in row.raw)
-        ]
-
-        def persist(row, year):
-            if isinstance(row.raw, dict) and "features" in row.raw:
-                row.raw.pop("built_year", None)
-                conn.execute(
-                    "UPDATE listings SET raw = ? WHERE source = ? AND source_id = ?",
-                    (json.dumps(row.raw, ensure_ascii=False), row.source, row.source_id),
+        feature_columns = {
+            "centralAir": "central_air",
+            "dishwasher": "dishwasher",
+            "washerDryer": "washer_dryer",
+            "doorman": "doorman",
+            "elevator": "elevator",
+        }
+        rows = []
+        for source_row in source_rows:
+            features = {
+                key: bool(source_row[column])
+                for key, column in feature_columns.items()
+            } if all(source_row[column] is not None for column in feature_columns.values()) else None
+            if features is not None:
+                continue
+            rows.append(
+                db.Listing(
+                    source=source_row["source"],
+                    source_id=source_row["source_id"],
+                    address=source_row["address"],
+                    unit=source_row["unit"],
+                    building_bbl=source_row["building_bbl"],
+                    price=source_row["price"],
+                    beds=source_row["beds"],
+                    baths=source_row["baths"],
+                    sqft=source_row["sqft"],
+                    url=source_row["url"],
+                    status=source_row["status"],
+                    listed_at=source_row["listed_at"],
+                    features=features,
+                    raw=json.loads(source_row["raw"] or "null"),
                 )
+            )
+
+        def persist(row, year, features):
+            db.upsert_features(conn, row.source, row.source_id, features)
             if row.building_bbl and year:
                 conn.execute(
                     "UPDATE buildings SET year_built = ? WHERE bbl = ?",
@@ -511,6 +515,8 @@ def enrich_saved_years(limit: int) -> int:
             page = context.new_page()
             years = enrich_streeteasy_years(rows, page, persist)
     return len(years)
+
+
 
 
 def scrape_streeteasy(limit: int, headless: bool) -> int:
