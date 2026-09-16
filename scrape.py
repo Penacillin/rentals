@@ -77,27 +77,28 @@ def street_detail_metadata(url: str) -> tuple[int | None, dict[str, bool]]:
 
 
 def street_detail_metadata_page(page, url: str) -> tuple[int | None, dict[str, bool]] | None:
-    page.goto(url, wait_until="commit", timeout=15000)
-    if captcha(page):
+    html = page.evaluate(
+        f"""async () => {{
+          const response = await fetch({json.dumps(url)}, {{credentials: "include"}});
+          return await response.text();
+        }}"""
+    )
+    if (
+        "Access to this page has been denied" in html
+        or "Press & Hold to confirm you are" in html
+        or "px-captcha" in html
+    ):
         raise CaptchaRequired(f"StreetEasy CAPTCHA at {url}")
-    try:
-        text = page.get_by_role("main").inner_text(timeout=10000)
-    except Exception:
-        try:
-            page.locator("body").wait_for(state="attached", timeout=10000)
-            text = page.evaluate("document.body ? document.body.innerText : ''")
-        except Exception:
-            text = ""
-    if not text:
+    if not html:
         print(f"StreetEasy detail text unavailable: {url}")
         return None
-    return detail_metadata(text)
+    return detail_metadata(html)
+
+
 LISTING_DATE_KEYS = {
     "listedat", "listeddate", "datelisted", "dateposted", "datepostedstring",
     "timeonzillow", "daysonzillow", "listingdate", "dateonmarket", "dateadded", "daysonmarket",
 }
-
-
 def listed_at(value: object) -> str | None:
     if isinstance(value, dict):
         for key, child in value.items():
@@ -513,6 +514,9 @@ def enrich_saved_years(limit: int) -> int:
 
         with browser_context(False) as context:
             page = context.new_page()
+            page.goto("https://streeteasy.com/", wait_until="commit", timeout=15000)
+            while captcha(page):
+                input("Solve CAPTCHA in browser window, then press Enter")
             years = enrich_streeteasy_years(rows, page, persist)
     return len(years)
 

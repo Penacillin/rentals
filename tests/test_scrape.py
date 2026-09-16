@@ -186,7 +186,11 @@ class ScraperParserTests(unittest.TestCase):
             def title(self):
                 return "fixture"
 
-            def evaluate(self, _script):
+            def evaluate(self, script):
+                if "fetch(" in script:
+                    url = script.split("fetch(", 1)[1].split(",", 1)[0].strip('"')
+                    self.urls.append(url)
+                    self.html = fixtures[url].read_text(encoding="utf-8")
                 return self.html
 
             def get_by_role(self, _role):
