@@ -44,6 +44,18 @@ FEATURE_PATTERNS = {
     "doorman": r"\bdoorman\b",
     "elevator": r"\belevator\b",
 }
+STREET_API_CAPTURE_SCRIPT = """(() => {
+  const calls = [];
+  window.__streeteasyApiRequests = calls;
+  const fetch = window.fetch;
+  window.fetch = function(input, init) {
+    const url = typeof input === "string" ? input : input?.url;
+    if (url?.includes("api-v6.streeteasy.com")) {
+      calls.push({url, body: init?.body == null ? null : String(init.body)});
+    }
+    return fetch.apply(this, arguments);
+  };
+})();"""
 
 
 def built_year(text: str) -> int | None:
@@ -60,23 +72,28 @@ class _Text(HTMLParser):
         self.parts.append(data)
 
 
-def detail_metadata(html: str) -> tuple[int | None, dict[str, bool]]:
+def detail_metadata(html: str) -> tuple[int | None, dict[str, bool], int | None, str | None]:
     parser = _Text()
     parser.feed(html)
     text = " ".join(parser.parts)
+    sqft = re.search(r"([\d,]+)\s*(?:ft²|sq\s?ft|square feet)\b", text, re.I)
+    history = text.split("Property history", 1)[-1]
+    listed = re.search(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", history)
     return built_year(text), {
         name: bool(re.search(pattern, text, re.I))
         for name, pattern in FEATURE_PATTERNS.items()
-    }
+    }, integer(sqft.group(1)) if sqft else None, listed.group(0) if listed else None
 
 
-def street_detail_metadata(url: str) -> tuple[int | None, dict[str, bool]]:
+def street_detail_metadata(url: str) -> tuple[int | None, dict[str, bool], int | None, str | None]:
     request = Request(url, headers={"User-Agent": "rentals/0.1"})
     with urlopen(request, timeout=30) as response:
         return detail_metadata(response.read().decode("utf-8", errors="replace"))
 
 
-def street_detail_metadata_page(page, url: str) -> tuple[int | None, dict[str, bool]] | None:
+def street_detail_metadata_page(page, url: str) -> tuple[int | None, dict[str, bool], int | None, str | None] | None:
+
+
     html = page.evaluate(
         f"""async () => {{
           const response = await fetch({json.dumps(url)}, {{credentials: "include"}});
@@ -291,6 +308,54 @@ def parse_streeteasy_api(payload: dict) -> list[db.Listing]:
             raw=node,
         ))
     return rows
+def _request_payload(response) -> dict | None:
+    request = response.request
+    try:
+        payload = request.post_data_json
+        return payload if isinstance(payload, dict) else None
+    except (AttributeError, TypeError, json.JSONDecodeError):
+        try:
+            raw = request.post_data
+            if callable(raw):
+                raw = raw()
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+            return payload if isinstance(payload, dict) else None
+        except (AttributeError, TypeError, json.JSONDecodeError):
+            return None
+def _captured_api_payload(page) -> tuple[str, dict] | None:
+    for call in page.evaluate("window.__streeteasyApiRequests || []"):
+        try:
+            payload = json.loads(call.get("body") or "")
+        except (AttributeError, TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            return call["url"], payload
+    return None
+
+
+def _page_payload(payload: object, page_number: int) -> object:
+    if isinstance(payload, dict):
+        return {
+            key: page_number if key == "page" else _page_payload(value, page_number)
+            for key, value in payload.items()
+        }
+    if isinstance(payload, list):
+        return [_page_payload(value, page_number) for value in payload]
+    return payload
+
+
+def streeteasy_api_page(page, url: str, payload: dict) -> dict:
+    return page.evaluate(
+        f"""async () => {{
+          const response = await fetch({json.dumps(url)}, {{
+            method: "POST",
+            headers: {{"content-type": "application/json"}},
+            credentials: "include",
+            body: JSON.stringify({json.dumps(payload)})
+          }});
+          return await response.json();
+        }}"""
+    )
 
 
 def _zillow_items(value: object) -> list[dict]:
@@ -399,29 +464,10 @@ def captcha(page) -> bool:
     )
 
 
-def street_cards(page) -> list[dict]:
-    cards = page.locator("article").evaluate_all(
-        """els => els.map(el => ({
-          text: el.innerText,
-          links: [...el.querySelectorAll('a[href^="/building/"]')].slice(0, 1).map(a => ({href: a.getAttribute('href'), text: [a.innerText]}))
-        }))"""
-    )
-    if cards:
-        return cards
-    return page.locator('a[href^="/building/"]').evaluate_all(
-        """els => els.map(el => ({text: el.innerText, links: [{href: el.getAttribute('href'), text: [el.innerText]}]}))"""
-    )
-def select_streeteasy_newest(page) -> bool:
-    try:
-        page.get_by_role("button", name=re.compile(r"sort", re.I)).click(timeout=3000)
-        page.get_by_text(re.compile(r"\bnewest\b", re.I)).first.click(timeout=3000)
-        return True
-    except Exception:
-        return False
 
 
 def enrich_streeteasy_years(rows: list[db.Listing], page=None, on_enriched=None) -> dict[str, int]:
-    metadata: dict[str, tuple[int | None, dict[str, bool]] | None] = {}
+    metadata: dict[str, tuple[int | None, dict[str, bool], int | None, str | None] | None] = {}
     years: dict[str, int] = {}
     for row in rows:
         if not row.url:
@@ -452,10 +498,13 @@ def enrich_streeteasy_years(rows: list[db.Listing], page=None, on_enriched=None)
                     break
                 finally:
                     attempt += 1
-        result = metadata[detail_url]
         if result:
-            year, features = result
+            year, features, sqft, listed_at = result
             row.features = features
+            if sqft is not None:
+                row.sqft = sqft
+            if listed_at is not None:
+                row.listed_at = listed_at
             if year and row.building_bbl:
                 years[row.building_bbl] = year
             if on_enriched:
@@ -467,7 +516,12 @@ def enrich_saved_years(limit: int) -> int:
     db.init()
     with db.connect() as conn:
         source_rows = conn.execute(
-            "SELECT * FROM listings WHERE source = 'streeteasy' ORDER BY source_id LIMIT ?",
+            """SELECT * FROM listings
+               WHERE source = 'streeteasy'
+                 AND (sqft IS NULL OR listed_at IS NULL OR central_air IS NULL
+                      OR dishwasher IS NULL OR washer_dryer IS NULL
+                      OR doorman IS NULL OR elevator IS NULL)
+               ORDER BY source_id LIMIT ?""",
             (limit,),
         ).fetchall()
         feature_columns = {
@@ -483,7 +537,7 @@ def enrich_saved_years(limit: int) -> int:
                 key: bool(source_row[column])
                 for key, column in feature_columns.items()
             } if all(source_row[column] is not None for column in feature_columns.values()) else None
-            if features is not None:
+            if features is not None and source_row["sqft"] is not None:
                 continue
             rows.append(
                 db.Listing(
@@ -506,6 +560,13 @@ def enrich_saved_years(limit: int) -> int:
 
         def persist(row, year, features):
             db.upsert_features(conn, row.source, row.source_id, features)
+            conn.execute(
+                """UPDATE listings
+                   SET sqft = COALESCE(?, sqft),
+                       listed_at = COALESCE(?, listed_at)
+                   WHERE source = ? AND source_id = ?""",
+                (row.sqft, row.listed_at, row.source, row.source_id),
+            )
             if row.building_bbl and year:
                 conn.execute(
                     "UPDATE buildings SET year_built = ? WHERE bbl = ?",
@@ -530,6 +591,7 @@ def scrape_streeteasy(limit: int, headless: bool) -> int:
     seen: set[str] = set()
     with browser_context(headless) as context:
         page = context.new_page()
+        page.add_init_script(STREET_API_CAPTURE_SCRIPT)
         api_rows: list[db.Listing] = []
         api_responses = []
 
@@ -538,56 +600,64 @@ def scrape_streeteasy(limit: int, headless: bool) -> int:
                 api_responses.append(response)
 
         page.on("response", collect_api)
+        api_endpoint = None
+        api_payload = None
         for page_number in range(1, 51):
             if page_number > 1:
                 page.wait_for_timeout(2000)
             api_rows.clear()
             api_responses.clear()
-            url = config["search_url"] if page_number == 1 else f"{config['search_url']}&{config['page_param']}={page_number}"
-            if not goto_with_retries(page, url, f"StreetEasy page {page_number}"):
-                continue
-            page.wait_for_timeout(2000)
-            for _ in range(3):
-                if not captcha(page):
-                    break
-                input("Solve captcha in browser window, then press Enter")
-                page.wait_for_timeout(2000)
-            if captcha(page):
-                raise RuntimeError("StreetEasy captcha unresolved; use --from-files DIR")
-            response_start = len(api_responses)
-            sort_selected = select_streeteasy_newest(page)
-            if sort_selected:
-                page.wait_for_timeout(2000)
-            responses = api_responses[response_start:] if sort_selected and len(api_responses) > response_start else api_responses
-            for response in responses:
+            if api_endpoint and api_payload and page_number > 1:
                 try:
-                    api_rows.extend(parse_streeteasy_api(response.json()))
+                    payload = _page_payload(api_payload, page_number)
+                    if not isinstance(payload, dict):
+                        raise TypeError("StreetEasy API payload must be an object")
+                    api_rows.extend(parse_streeteasy_api(streeteasy_api_page(page, api_endpoint, payload)))
+                    print(f"StreetEasy API page {page_number}: {len(api_rows)} rows")
                 except Exception as exc:
-                    print(f"StreetEasy API response parse error: {exc}")
-            cards = api_rows or street_cards(page)
-            if api_rows:
-                dom_ages = {}
-                for card in street_cards(page):
-                    dom_row = _listing_from_card(card)
-                    if dom_row and dom_row.listed_at:
-                        dom_ages[dom_row.source_id] = dom_row.listed_at
-                        if dom_row.address:
-                            dom_ages[dom_row.address] = dom_row.listed_at
-                for row in api_rows:
-                    if row.listed_at is None:
-                        row.listed_at = dom_ages.get(row.source_id) or dom_ages.get(row.address)
+                    print(f"StreetEasy API page {page_number} error: {exc}")
+                    break
+            else:
+                url = config["search_url"] if page_number == 1 else f"{config['search_url']}&{config['page_param']}={page_number}"
+                if not goto_with_retries(page, url, f"StreetEasy page {page_number}"):
+                    continue
+                page.wait_for_timeout(2000)
+                for _ in range(3):
+                    if not captcha(page):
+                        break
+                    input("Solve captcha in browser window, then press Enter")
+                    page.wait_for_timeout(2000)
+                if captcha(page):
+                    raise RuntimeError("StreetEasy captcha unresolved; use --from-files DIR")
+                if api_payload is None:
+                    captured = _captured_api_payload(page)
+                    if captured:
+                        api_endpoint, api_payload = captured
+                        print(f"StreetEasy API request captured for pagination: {api_endpoint}")
+                for response in api_responses:
+                    if api_payload is None:
+                        candidate = _request_payload(response)
+                        if candidate:
+                            api_payload = candidate
+                            api_endpoint = response.url
+                            print(f"StreetEasy API request captured for pagination: {api_endpoint}")
+                    try:
+                        api_rows.extend(parse_streeteasy_api(response.json()))
+                    except Exception as exc:
+                        print(f"StreetEasy API response parse error: {exc}")
+            cards = api_rows
             if not cards:
                 break
             page_rows = []
-            for card in cards:
-                row = card if isinstance(card, db.Listing) else _listing_from_card(card)
-                if row and row.source_id not in seen:
+            for row in cards:
+                if row.source_id not in seen:
                     seen.add(row.source_id)
                     page_rows.append(row)
                     if matches_search(row):
                         rows.append(row)
                         if len(rows) >= limit:
                             return save(rows[:limit], "streeteasy")
+            print(f"StreetEasy page {page_number}: {len(page_rows)} new, {len(rows)} accepted")
             if not page_rows:
                 break
     return save(rows[:limit], "streeteasy")

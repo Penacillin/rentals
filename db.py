@@ -177,8 +177,9 @@ def upsert_listing(db: sqlite3.Connection, listing: Listing) -> None:
         ON CONFLICT(source, source_id) DO UPDATE SET
           address=excluded.address, unit=excluded.unit, building_bbl=excluded.building_bbl,
           price=excluded.price, beds=excluded.beds, baths=excluded.baths,
-          sqft=excluded.sqft, url=excluded.url, status=excluded.status,
-          listed_at=excluded.listed_at, scraped_at=datetime('now'), raw=excluded.raw""",
+          sqft=COALESCE(excluded.sqft, listings.sqft), url=excluded.url,
+          status=excluded.status, listed_at=COALESCE(excluded.listed_at, listings.listed_at),
+          scraped_at=datetime('now'), raw=excluded.raw""",
         values,
     )
 

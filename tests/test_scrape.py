@@ -59,6 +59,12 @@ class ScraperParserTests(unittest.TestCase):
         self.assertEqual(rows[0].baths, 1.5)
         self.assertEqual(rows[0].listed_at, "2026-09-10")
         self.assertEqual(rows[0].url, "https://streeteasy.com/building/123-main-st/7b")
+    def test_streeteasy_api_page_payload_updates_nested_page(self):
+        payload = {"variables": {"input": {"page": 1, "perPage": 500}}}
+
+        updated = scrape._page_payload(payload, 2)
+
+        self.assertEqual(updated, {"variables": {"input": {"page": 2, "perPage": 500}}})
     def test_catalog_surfaces_all_source_field_conflicts(self):
         def row(source, price, beds, baths, sqft):
             return {
@@ -115,16 +121,20 @@ class ScraperParserTests(unittest.TestCase):
             build_catalog.norm("185 York St #3B"),
         )
 
-    def test_streeteasy_detail_metadata_extracts_year_and_features(self):
-        year, features = scrape.detail_metadata(
+    def test_streeteasy_detail_metadata_extracts_listing_date_sqft_year_and_features(self):
+        year, features, sqft, listed_at = scrape.detail_metadata(
             """
             <main><h2>About the building</h2>
+            <p>1,000 ft²</p>
             <p>Central air Dishwasher Washer/dryer Doorman Elevator</p>
-            <p>2012 built</p></main>
+            <p>2012 built</p>
+            <h2>Property history</h2><p>9/10/2026</p>
             """
         )
 
         self.assertEqual(year, 2012)
+        self.assertEqual(sqft, 1000)
+        self.assertEqual(listed_at, "9/10/2026")
         self.assertEqual(
             features,
             {
