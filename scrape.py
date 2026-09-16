@@ -133,7 +133,7 @@ def matches_search(row: db.Listing) -> bool:
         return False
     bounds = CONFIG.get(row.source, {}).get("map_bounds")
     if bounds:
-        raw = row.raw or {}
+        raw = row.raw if isinstance(row.raw, dict) else {}
         point = raw.get("latLong") or raw.get("geoPoint") or {}
         lat, lon = number(point.get("latitude")), number(point.get("longitude"))
         if lat is not None and lon is not None and not (
@@ -191,14 +191,15 @@ class _Cards(HTMLParser):
         self.anchors: list[dict] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attrs = dict(attrs)
+        attributes = dict(attrs)
         if tag == "article" and self._article is None:
             self._article = {"text": [], "links": []}
             self._depth = 1
         elif self._article is not None:
             self._depth += 1
-        if tag == "a" and attrs.get("href", "").startswith("/building/"):
-            self._anchor = {"href": attrs["href"], "text": []}
+        href = attributes.get("href")
+        if tag == "a" and href and href.startswith("/building/"):
+            self._anchor = {"href": href, "text": []}
             self.anchors.append(self._anchor)
             if self._article is not None:
                 self._article["links"].append(self._anchor)
@@ -234,7 +235,7 @@ def _listing_from_card(card: dict, base_url: str = "https://streeteasy.com") -> 
     text = card.get("text") or ""
     values = card_values(text)
     address = " ".join(link.get("text", [])) if isinstance(link, dict) else card.get("address")
-    address = address.strip() or None
+    address = address.strip() if isinstance(address, str) else None
     return db.Listing(
         source="streeteasy",
         source_id=urlsplit(url).path,
@@ -579,7 +580,7 @@ def scrape_streeteasy(limit: int, headless: bool) -> int:
                 break
             page_rows = []
             for card in cards:
-                row = card if api_rows else _listing_from_card(card)
+                row = card if isinstance(card, db.Listing) else _listing_from_card(card)
                 if row and row.source_id not in seen:
                     seen.add(row.source_id)
                     page_rows.append(row)

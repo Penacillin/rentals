@@ -1,10 +1,10 @@
 from __future__ import annotations
-from concurrent.futures import ThreadPoolExecutor
 
 import argparse
 import json
 import os
-from datetime import date, datetime, time, timedelta
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import urlencode

@@ -41,6 +41,7 @@ def nested(row, note: str | None = None) -> dict:
 
 def format_value(key: str, value: object) -> str:
     if key == "price":
+        assert isinstance(value, (int, float))
         return f"${int(value):,}"
     return f"{value:g}" if isinstance(value, float) else str(value)
 def row_value(row, key: str, default=None):
@@ -77,6 +78,7 @@ def scraped_row(rows: list, buildings: dict, hpd: dict) -> dict:
     street = next((row for row in rows if row["source"] == "streeteasy"), None)
     zillow = next((row for row in rows if row["source"] == "zillow"), None)
     primary = street or zillow
+    assert primary is not None
     address = listing_address(primary)
     building = buildings.get(primary["building_bbl"])
     report = hpd.get(primary["building_bbl"])
