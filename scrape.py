@@ -719,6 +719,7 @@ def delete_stale(source: str, started_at: str) -> int:
 
 def refresh(limit: int, headless: bool) -> None:
     import build_catalog
+    import commute
 
     for source, scraper in (("streeteasy", scrape_streeteasy), ("zillow", scrape_zillow)):
         with db.connect() as conn:
@@ -728,6 +729,7 @@ def refresh(limit: int, headless: bool) -> None:
             raise RuntimeError(f"{source} scrape returned no listings")
         print(f"removed {delete_stale(source, started_at)} stale {source} listings")
     print(f"enriched {enrich_saved_years(limit)} StreetEasy buildings")
+    print(f"saved commute times for {commute.calculate(refresh=True)} listings")
     build_catalog.main()
 
 

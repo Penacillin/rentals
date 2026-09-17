@@ -87,11 +87,10 @@ def plan(origin: tuple[float, float], destination: tuple[float, float], travel_d
         "toPlace": f"{destination[0]},{destination[1]}",
         "date": travel_date.isoformat(),
         "time": "09:30:00",
-        "mode": "TRANSIT,WALK",
         "includeWalkingItinerary": "true",
         "allowWalkingItinerary": "true",
         "maxItineraries": "10",
-        "api_key": key,
+        "apikey": key,
     }
     request = Request(f"{API}?{urlencode(params)}", headers={"User-Agent": "rentals/0.1"})
     try:
@@ -121,16 +120,11 @@ def route_minutes(payload: dict) -> tuple[int | None, int | None]:
     )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--limit", type=int, help="maximum source rows; default all")
-    parser.add_argument("--date", help="YYYY-MM-DD; default next weekday")
-    parser.add_argument("--refresh", action="store_true", help="replace existing building routes")
-    args = parser.parse_args()
+def calculate(limit: int | None = None, travel_date: date | None = None, refresh: bool = False) -> int:
     api_key = dotenv_key()
     if not api_key:
-        raise SystemExit("TRANSITLAND_API_KEY missing; set it in .env or environment")
-    travel_date = date.fromisoformat(args.date) if args.date else next_weekday()
+        raise RuntimeError("TRANSITLAND_API_KEY missing; set it in .env or environment")
+    travel_date = travel_date or next_weekday()
     destination = (
         float(CONFIG["center"]["lat"]),
         float(CONFIG["center"]["lng"]),
@@ -139,9 +133,9 @@ def main() -> None:
     with db.connect() as conn:
         query = "SELECT * FROM listings ORDER BY source, source_id"
         params = ()
-        if args.limit is not None:
+        if limit is not None:
             query += " LIMIT ?"
-            params = (args.limit,)
+            params = (limit,)
         listings = conn.execute(query, params).fetchall()
         buildings = {row["bbl"]: row for row in conn.execute("SELECT * FROM buildings")}
         groups: dict[str, list] = {}
@@ -158,7 +152,7 @@ def main() -> None:
                 ),
                 None,
             )
-            if cached and not args.refresh:
+            if cached and not refresh:
                 return rows, (
                     cached["walk_minutes"],
                     cached["transit_minutes"],
@@ -188,7 +182,18 @@ def main() -> None:
                     )
                     done += 1
         conn.commit()
-    print(f"saved commute times for {done} listings on {travel_date} at 09:30 America/New_York")
+    return done
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--limit", type=int, help="maximum source rows; default all")
+    parser.add_argument("--date", help="YYYY-MM-DD; default next weekday")
+    parser.add_argument("--refresh", action="store_true", help="replace existing building routes")
+    args = parser.parse_args()
+    travel_date = date.fromisoformat(args.date) if args.date else None
+    done = calculate(args.limit, travel_date, args.refresh)
+    print(f"saved commute times for {done} listings on {travel_date or next_weekday()} at 09:30 America/New_York")
 
 
 if __name__ == "__main__":
