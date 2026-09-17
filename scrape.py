@@ -707,6 +707,28 @@ def scrape_zillow(limit: int, headless: bool) -> int:
                 break
             url = urljoin("https://www.zillow.com", next_url)
     return save(rows[:limit], "zillow")
+def delete_stale(source: str, started_at: str) -> int:
+    with db.connect() as conn:
+        removed = conn.execute(
+            "DELETE FROM listings WHERE source = ? AND scraped_at < ?",
+            (source, started_at),
+        ).rowcount
+        conn.commit()
+    return removed
+
+
+def refresh(limit: int, headless: bool) -> None:
+    import build_catalog
+
+    for source, scraper in (("streeteasy", scrape_streeteasy), ("zillow", scrape_zillow)):
+        with db.connect() as conn:
+            started_at = conn.execute("SELECT datetime('now')").fetchone()[0]
+        count = scraper(limit, headless)
+        if not count:
+            raise RuntimeError(f"{source} scrape returned no listings")
+        print(f"removed {delete_stale(source, started_at)} stale {source} listings")
+    print(f"enriched {enrich_saved_years(limit)} StreetEasy buildings")
+    build_catalog.main()
 
 
 def main() -> None:
@@ -718,6 +740,9 @@ def main() -> None:
         command.add_argument("--from-files")
         command.add_argument("--headless", action="store_true")
         command.set_defaults(source=source)
+    refresh_command = sub.add_parser("refresh")
+    refresh_command.add_argument("--limit", type=int, default=1200)
+    refresh_command.add_argument("--headless", action="store_true")
     detail = sub.add_parser("enrich-years")
     detail.add_argument("--limit", type=int, default=1000)
     args = parser.parse_args()
@@ -726,6 +751,9 @@ def main() -> None:
         count = enrich_saved_years(args.limit)
         print(f"enriched {count} StreetEasy building years")
         return
+    if args.source == "refresh":
+        refresh(args.limit, args.headless)
+        return
     if args.from_files:
         count = saved_files(args.source, args.from_files, args.limit)
     elif args.source == "streeteasy":
@@ -733,6 +761,8 @@ def main() -> None:
     else:
         count = scrape_zillow(args.limit, args.headless)
     print(f"saved {count} {args.source} listings")
+
+
 
 
 if __name__ == "__main__":
