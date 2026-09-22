@@ -68,13 +68,18 @@ def listing_coordinates(row, buildings: dict) -> tuple[float, float] | None:
     return None
 
 
-def plan(origin: tuple[float, float], destination: tuple[float, float], travel_date: date) -> dict:
+def plan(
+    origin: tuple[float, float],
+    destination: tuple[float, float],
+    travel_date: date,
+    mode: str = "WALK,TRANSIT",
+) -> dict:
     params = {
         "fromPlace": f"{origin[0]},{origin[1]}",
         "toPlace": f"{destination[0]},{destination[1]}",
         "date": travel_date.isoformat(),
         "time": "09:30am",
-        "mode": "WALK,TRANSIT",
+        "mode": mode,
         "arriveBy": "false",
     }
     request = Request(f"{API}?{urlencode(params)}", headers={"User-Agent": "rentals/0.1"})
@@ -88,7 +93,7 @@ def plan(origin: tuple[float, float], destination: tuple[float, float], travel_d
 
 def route_minutes(payload: dict) -> tuple[int | None, int | None]:
     itineraries = (payload.get("plan") or {}).get("itineraries") or []
-    walk, transit, transit_walk = [], [], []
+    walk, transit = [], []
     for itinerary in itineraries:
         duration = itinerary.get("duration")
         if not isinstance(duration, (int, float)):
@@ -97,12 +102,10 @@ def route_minutes(payload: dict) -> tuple[int | None, int | None]:
         has_transit = any(leg.get("transitLeg") or leg.get("mode") not in {None, "WALK"} for leg in legs)
         if has_transit or itinerary.get("transitTime", 0) > 0:
             transit.append(duration)
-            if isinstance(itinerary.get("walkTime"), (int, float)):
-                transit_walk.append(itinerary["walkTime"])
         else:
             walk.append(duration)
     return (
-        round(min(walk or transit_walk) / 60) if walk or transit_walk else None,
+        round(min(walk) / 60) if walk else None,
         round(min(transit) / 60) if transit else None,
     )
 
@@ -146,10 +149,10 @@ def calculate(limit: int | None = None, travel_date: date | None = None, refresh
             if not origin:
                 return rows, None, f"{rows[0]['address']}: no coordinates"
             try:
-                return rows, (
-                    *route_minutes(plan(origin, destination, travel_date)),
-                    travel_date.isoformat(),
-                ), None
+                walk, transit = route_minutes(plan(origin, destination, travel_date))
+                if walk is None:
+                    walk, _ = route_minutes(plan(origin, destination, travel_date, mode="WALK"))
+                return rows, (walk, transit, travel_date.isoformat()), None
             except Exception as error:
                 return rows, None, f"{rows[0]['address']}: {error}"
 
