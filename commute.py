@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -16,22 +15,10 @@ import geo
 
 ROOT = Path(__file__).parent
 CONFIG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
-API = "https://transit.land/api/v2/routing/otp/plan"
+API = "https://otp-mta-prod.camsys-apps.com/otp/routers/default/plan"
 TZ = ZoneInfo("America/New_York")
 
 
-def dotenv_key() -> str | None:
-    key = os.getenv("TRANSITLAND_API_KEY")
-    if key:
-        return key
-    path = ROOT / ".env"
-    if not path.exists():
-        return None
-    for line in path.read_text(encoding="utf-8").splitlines():
-        name, separator, value = line.partition("=")
-        if name.strip() == "TRANSITLAND_API_KEY" and separator:
-            return value.strip().strip("'\"") or None
-    return None
 
 
 def next_weekday(today: date | None = None) -> date:
@@ -81,16 +68,14 @@ def listing_coordinates(row, buildings: dict) -> tuple[float, float] | None:
     return None
 
 
-def plan(origin: tuple[float, float], destination: tuple[float, float], travel_date: date, key: str) -> dict:
+def plan(origin: tuple[float, float], destination: tuple[float, float], travel_date: date) -> dict:
     params = {
         "fromPlace": f"{origin[0]},{origin[1]}",
         "toPlace": f"{destination[0]},{destination[1]}",
         "date": travel_date.isoformat(),
-        "time": "09:30:00",
-        "includeWalkingItinerary": "true",
-        "allowWalkingItinerary": "true",
-        "maxItineraries": "10",
-        "apikey": key,
+        "time": "09:30am",
+        "mode": "WALK,TRANSIT",
+        "arriveBy": "false",
     }
     request = Request(f"{API}?{urlencode(params)}", headers={"User-Agent": "rentals/0.1"})
     try:
@@ -98,7 +83,7 @@ def plan(origin: tuple[float, float], destination: tuple[float, float], travel_d
             return json.load(response)
     except HTTPError as error:
         body = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Transitland HTTP {error.code}: {body[:200]}") from error
+        raise RuntimeError(f"MTA OTP HTTP {error.code}: {body[:200]}") from error
 
 
 def route_minutes(payload: dict) -> tuple[int | None, int | None]:
@@ -121,9 +106,6 @@ def route_minutes(payload: dict) -> tuple[int | None, int | None]:
 
 
 def calculate(limit: int | None = None, travel_date: date | None = None, refresh: bool = False) -> int:
-    api_key = dotenv_key()
-    if not api_key:
-        raise RuntimeError("TRANSITLAND_API_KEY missing; set it in .env or environment")
     travel_date = travel_date or next_weekday()
     destination = (
         float(CONFIG["center"]["lat"]),
@@ -163,7 +145,7 @@ def calculate(limit: int | None = None, travel_date: date | None = None, refresh
                 return rows, None, f"{rows[0]['address']}: no coordinates"
             try:
                 return rows, (
-                    *route_minutes(plan(origin, destination, travel_date, api_key)),
+                    *route_minutes(plan(origin, destination, travel_date)),
                     travel_date.isoformat(),
                 ), None
             except Exception as error:
