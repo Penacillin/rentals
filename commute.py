@@ -88,7 +88,7 @@ def plan(origin: tuple[float, float], destination: tuple[float, float], travel_d
 
 def route_minutes(payload: dict) -> tuple[int | None, int | None]:
     itineraries = (payload.get("plan") or {}).get("itineraries") or []
-    walk, transit = [], []
+    walk, transit, transit_walk = [], [], []
     for itinerary in itineraries:
         duration = itinerary.get("duration")
         if not isinstance(duration, (int, float)):
@@ -97,10 +97,12 @@ def route_minutes(payload: dict) -> tuple[int | None, int | None]:
         has_transit = any(leg.get("transitLeg") or leg.get("mode") not in {None, "WALK"} for leg in legs)
         if has_transit or itinerary.get("transitTime", 0) > 0:
             transit.append(duration)
+            if isinstance(itinerary.get("walkTime"), (int, float)):
+                transit_walk.append(itinerary["walkTime"])
         else:
             walk.append(duration)
     return (
-        round(min(walk) / 60) if walk else None,
+        round(min(walk or transit_walk) / 60) if walk or transit_walk else None,
         round(min(transit) / 60) if transit else None,
     )
 

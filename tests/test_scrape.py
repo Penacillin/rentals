@@ -110,6 +110,15 @@ class ScraperParserTests(unittest.TestCase):
         }
 
         self.assertEqual(commute.route_minutes(payload), (30, 35))
+        self.assertEqual(
+            commute.route_minutes(
+                {"plan": {"itineraries": [
+                    {"duration": 1020, "walkTime": 540, "transitTime": 450,
+                     "legs": [{"mode": "WALK"}, {"mode": "SUBWAY", "transitLeg": True}]},
+                ]}}
+            ),
+            (9, 17),
+        )
 
     def test_listing_address_matches_building_and_unit_forms(self):
         self.assertEqual(
