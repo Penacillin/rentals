@@ -9,6 +9,28 @@ import db
 import geo
 
 SOCRATA = "https://data.cityofnewyork.us/resource"
+JUSTFIX = "https://api.justfix.org/api/address/wowza"
+
+
+def justfix_report(bbl: str) -> dict | None:
+    boro, block, lot = bbl_parts(bbl)
+    url = f"{JUSTFIX}?{urlencode({'block': block, 'lot': lot, 'borough': boro})}"
+    try:
+        request = Request(url, headers={"User-Agent": "rentals/0.1"})
+        with urlopen(request, timeout=30) as response:
+            payload = json.load(response)
+    except (OSError, ValueError):
+        return None
+    return next((row for row in payload.get("addrs", []) if row.get("bbl") == bbl), None)
+
+
+def justfix_contact(row: dict, title: str) -> str | None:
+    for contact in row.get("ownernames") or []:
+        if contact.get("title", "").casefold() == title.casefold():
+            return contact.get("value")
+    return None
+
+
 
 
 def fetch(dataset: str, params: list[tuple[str, str]]) -> list[dict]:
@@ -49,6 +71,25 @@ def contact_name(contact: dict) -> str | None:
 
 def hpd_report(bbl: str) -> dict:
     boro, block, lot = bbl_parts(bbl)
+    fast = justfix_report(bbl)
+    if fast:
+        return {
+            "bbl": bbl,
+            "complaints_total": int(fast.get("totalcomplaints") or 0),
+            "complaints_open": count(
+                "ygpa-z7cr",
+                [("bbl", bbl), ("$where", "complaint_status != 'CLOSE'")],
+                "complaint_id",
+            ),
+            "violations_total": int(fast.get("totalviolations") or 0),
+            "violations_open": int(fast.get("openviolations") or 0),
+            "vacate_orders": count("tb8q-a3ar", [("bbl", bbl)], "building_id"),
+            "bedbug_filings": count("wz6d-d3jb", [("bbl", bbl)], "building_id"),
+            "owner": (fast.get("corpnames") or [None])[0],
+            "mgmt_agent": justfix_contact(fast, "Agent") or justfix_contact(fast, "SiteManager"),
+            "year_built": fast.get("yearbuilt"),
+            "hpd_building_id": fast.get("hpdbuildingid"),
+        }
     block_lot = [("boroid", boro), ("block", block), ("lot", lot)]
     report = {
         "bbl": bbl,
@@ -119,7 +160,7 @@ def enrich() -> None:
             )
         conn.commit()
         buildings = conn.execute(
-            "SELECT bbl FROM buildings WHERE year_built IS NULL"
+            "SELECT bbl FROM buildings WHERE year_built IS NULL AND bbl NOT IN (SELECT bbl FROM hpd)"
         ).fetchall()
         for row in buildings:
             year = pluto_year(row["bbl"])
@@ -134,7 +175,22 @@ def enrich() -> None:
             "SELECT bbl FROM buildings WHERE bbl NOT IN (SELECT bbl FROM hpd)"
         ).fetchall()
         for row in buildings:
-            db.upsert_hpd(conn, hpd_report(row["bbl"]))
+            report = hpd_report(row["bbl"])
+            db.upsert_hpd(conn, report)
+            if report.get("year_built") or report.get("hpd_building_id"):
+                conn.execute(
+                    """UPDATE buildings
+                       SET year_built=COALESCE(?, year_built),
+                           year_source=COALESCE(?, year_source),
+                           hpd_building_id=COALESCE(?, hpd_building_id)
+                       WHERE bbl=?""",
+                    (
+                        report.get("year_built"),
+                        "JustFix" if report.get("year_built") else None,
+                        report.get("hpd_building_id"),
+                        row["bbl"],
+                    ),
+                )
         conn.commit()
 
         buildings = conn.execute(
