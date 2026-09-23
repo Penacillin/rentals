@@ -13,7 +13,7 @@ STABILIZED = ROOT / "rent_stabilized.csv"
 OUTPUT = ROOT / "nyc-rent-catalog-360-park-ave-south.html"
 FIELDS = (
     "address", "area", "baths", "beds", "built", "commuteDate", "features", "listedAt",
-    "notes", "ppsf", "price", "rentStabilized", "source", "sqft", "streeteasy", "transitMinutes",
+    "notes", "oddRent", "ppsf", "price", "rentStabilized", "source", "sqft", "streeteasy", "transitMinutes",
     "url", "verification", "walkMinutes", "zillow",
 )
 
@@ -158,7 +158,8 @@ def build_rows() -> list[dict]:
     result = []
     for rows in scraped.values():
         row = scraped_row(rows, buildings, hpd)
-        row["rentStabilized"] = address_key(row["address"]) in stabilized
+        row["oddRent"] = row["price"] is not None and row["price"] % 10 != 0
+        row["rentStabilized"] = address_key(db.building_address(row["address"])) in stabilized
         result.append({key: row.get(key) for key in FIELDS})
     return result
 
