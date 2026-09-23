@@ -158,7 +158,7 @@ def build_rows() -> list[dict]:
     result = []
     for rows in scraped.values():
         row = scraped_row(rows, buildings, hpd)
-        row["oddRent"] = row["price"] is not None and row["price"] % 10 != 0
+        row["oddRent"] = row["price"] is not None and row["price"] % 5 != 0
         row["rentStabilized"] = address_key(db.building_address(row["address"])) in stabilized
         result.append({key: row.get(key) for key in FIELDS})
     return result
