@@ -77,12 +77,14 @@ def detail_metadata(html: str) -> tuple[int | None, dict[str, bool], int | None,
     parser.feed(html)
     text = " ".join(parser.parts)
     sqft = re.search(r"([\d,]+)\s*(?:ft²|sq\s?ft|square feet)\b", text, re.I)
+    days = re.search(r"\bDays on market\s+(\d+)\s+days?\b", text, re.I)
     history = text.split("Property history", 1)[-1]
-    listed = re.search(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", history)
+    listed_date = re.search(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", history)
+    listed = days.group(1) if days else listed_date.group(0) if listed_date else None
     return built_year(text), {
         name: bool(re.search(pattern, text, re.I))
         for name, pattern in FEATURE_PATTERNS.items()
-    }, integer(sqft.group(1)) if sqft else None, listed.group(0) if listed else None
+    }, integer(sqft.group(1)) if sqft else None, listed
 
 
 def street_detail_metadata(url: str) -> tuple[int | None, dict[str, bool], int | None, str | None]:
@@ -569,8 +571,8 @@ def enrich_saved_years(limit: int) -> int:
             )
             if row.building_bbl and year:
                 conn.execute(
-                    "UPDATE buildings SET year_built = ? WHERE bbl = ?",
-                    (year, row.building_bbl),
+                    "UPDATE buildings SET year_built=?, year_source=? WHERE bbl=?",
+                    (year, "StreetEasy", row.building_bbl),
                 )
             conn.commit()
 
