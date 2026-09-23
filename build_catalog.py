@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import re
 from pathlib import Path
@@ -8,10 +9,11 @@ import db
 
 ROOT = Path(__file__).parent
 TEMPLATE = ROOT / "catalog_template.html"
+STABILIZED = ROOT / "rent_stabilized.csv"
 OUTPUT = ROOT / "nyc-rent-catalog-360-park-ave-south.html"
 FIELDS = (
     "address", "area", "baths", "beds", "built", "commuteDate", "features", "listedAt",
-    "notes", "ppsf", "price", "source", "sqft", "streeteasy", "transitMinutes",
+    "notes", "ppsf", "price", "rentStabilized", "source", "sqft", "streeteasy", "transitMinutes",
     "url", "verification", "walkMinutes", "zillow",
 )
 
@@ -22,6 +24,21 @@ def norm(address: str | None) -> str:
     for long, short in (("street", "st"), ("avenue", "ave"), ("boulevard", "blvd"), ("road", "rd"), ("place", "pl"), ("drive", "dr"), ("court", "ct"), ("lane", "ln"), ("terrace", "ter")):
         value = re.sub(rf"\b{long}\b", short, value)
     return re.sub(r"\s+", " ", value).strip()
+
+def address_key(address: str | None) -> str:
+    value = norm(address)
+    for long, short in (("north", "n"), ("south", "s"), ("east", "e"), ("west", "w")):
+        value = re.sub(rf"\b{long}\b", short, value)
+    return value
+
+
+def stabilized_keys() -> set[str]:
+    with STABILIZED.open(newline="", encoding="utf-8") as source:
+        return {
+            address_key(f"{row['CLEAN_BUILDING_NO'] or row['BUILDING_NO']} {row['STREET']}")
+            for row in csv.DictReader(source)
+        }
+
 
 
 def listing_address(row) -> str:
@@ -137,10 +154,13 @@ def build_rows() -> list[dict]:
     scraped: dict[str, list] = {}
     for row in listings:
         scraped.setdefault(norm(listing_address(row)), []).append(row)
-    return [
-        {key: scraped_row(rows, buildings, hpd).get(key) for key in FIELDS}
-        for rows in scraped.values()
-    ]
+    stabilized = stabilized_keys()
+    result = []
+    for rows in scraped.values():
+        row = scraped_row(rows, buildings, hpd)
+        row["rentStabilized"] = address_key(row["address"]) in stabilized
+        result.append({key: row.get(key) for key in FIELDS})
+    return result
 
 
 def main() -> None:
