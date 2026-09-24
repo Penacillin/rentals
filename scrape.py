@@ -520,6 +520,9 @@ def enrich_saved_years(limit: int) -> int:
         source_rows = conn.execute(
             """SELECT * FROM listings
                WHERE source = 'streeteasy'
+                 AND (sqft IS NULL OR listed_at IS NULL OR central_air IS NULL
+                      OR dishwasher IS NULL OR washer_dryer IS NULL
+                      OR doorman IS NULL OR elevator IS NULL)
                ORDER BY source_id LIMIT ?""",
             (limit,),
         ).fetchall()
@@ -536,6 +539,8 @@ def enrich_saved_years(limit: int) -> int:
                 key: bool(source_row[column])
                 for key, column in feature_columns.items()
             } if all(source_row[column] is not None for column in feature_columns.values()) else None
+            if features is not None and source_row["sqft"] is not None:
+                continue
             rows.append(
                 db.Listing(
                     source=source_row["source"],
