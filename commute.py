@@ -110,7 +110,12 @@ def route_minutes(payload: dict) -> tuple[int | None, int | None]:
     )
 
 
-def calculate(limit: int | None = None, travel_date: date | None = None, refresh: bool = False) -> int:
+def calculate(
+    limit: int | None = None,
+    travel_date: date | None = None,
+    refresh: bool = False,
+    source_ids: set[str] | None = None,
+) -> int:
     travel_date = travel_date or next_weekday()
     destination = (
         float(CONFIG["center"]["lat"]),
@@ -118,47 +123,50 @@ def calculate(limit: int | None = None, travel_date: date | None = None, refresh
     )
     db.init()
     with db.connect() as conn:
-        query = "SELECT * FROM listings ORDER BY source, source_id"
-        params = ()
-        if limit is not None:
-            query += " LIMIT ?"
-            params = (limit,)
-        listings = conn.execute(query, params).fetchall()
+        listings = conn.execute("SELECT * FROM listings ORDER BY source, source_id").fetchall()
+        if limit is not None and source_ids is None:
+            listings = listings[:limit]
         buildings = {row["bbl"]: row for row in conn.execute("SELECT * FROM buildings")}
         groups: dict[str, list] = {}
         for row in listings:
             group_key = row["building_bbl"] or db.building_address(row["address"]) or row["source_id"]
             groups.setdefault(group_key, []).append(row)
+        targets = [
+            (rows, [row for row in rows if source_ids is None or row["source_id"] in source_ids])
+            for rows in groups.values()
+        ]
+        targets = [(all_rows, selected) for all_rows, selected in targets if selected]
 
-        def fetch(rows):
+        def fetch(group):
+            all_rows, selected = group
             cached = next(
                 (
-                    row for row in rows
+                    row for row in all_rows
                     if row["commute_date"]
                     and (row["walk_minutes"] is not None or row["transit_minutes"] is not None)
                 ),
                 None,
             )
             if cached and not refresh:
-                return rows, (
+                return selected, (
                     cached["walk_minutes"],
                     cached["transit_minutes"],
                     cached["commute_date"],
                 ), None
-            origin = listing_coordinates(rows[0], buildings)
+            origin = listing_coordinates(selected[0], buildings)
             if not origin:
-                return rows, None, f"{rows[0]['address']}: no coordinates"
+                return selected, None, f"{selected[0]['address']}: no coordinates"
             try:
                 walk, transit = route_minutes(plan(origin, destination, travel_date))
                 if walk is None:
                     walk, _ = route_minutes(plan(origin, destination, travel_date, mode="WALK"))
-                return rows, (walk, transit, travel_date.isoformat()), None
+                return selected, (walk, transit, travel_date.isoformat()), None
             except Exception as error:
-                return rows, None, f"{rows[0]['address']}: {error}"
+                return selected, None, f"{selected[0]['address']}: {error}"
 
         done = 0
         with ThreadPoolExecutor(max_workers=8) as pool:
-            for rows, result, error in pool.map(fetch, groups.values()):
+            for rows, result, error in pool.map(fetch, targets):
                 if error:
                     print(f"skipped {error}")
                     continue
@@ -177,9 +185,10 @@ def main() -> None:
     parser.add_argument("--limit", type=int, help="maximum source rows; default all")
     parser.add_argument("--date", help="YYYY-MM-DD; default next weekday")
     parser.add_argument("--refresh", action="store_true", help="replace existing building routes")
+    parser.add_argument("--source-id", action="append", help="update only these source IDs; repeatable")
     args = parser.parse_args()
     travel_date = date.fromisoformat(args.date) if args.date else None
-    done = calculate(args.limit, travel_date, args.refresh)
+    done = calculate(args.limit, travel_date, args.refresh, set(args.source_id) if args.source_id else None)
     print(f"saved commute times for {done} listings on {travel_date or next_weekday()} at 09:30 America/New_York")
 
 

@@ -1,3 +1,5 @@
+import threading
+import time
 from datetime import date, timedelta
 import sys
 import unittest
@@ -9,6 +11,7 @@ sys.path.insert(0, str(ROOT))
 
 import scrape
 import build_catalog
+import commute
 
 
 FIXTURES = ROOT / "tests" / "fixtures"
@@ -273,5 +276,67 @@ class ScraperParserTests(unittest.TestCase):
         self.assertEqual([row.source_id for row in rows], ["98765:0", "98765:1"])
 
 
+
+    def test_transit_routes_selected_listings_concurrently(self):
+        rows = [
+            {"source": "streeteasy", "source_id": "old", "address": "1 Main St #1A",
+             "building_bbl": "1000000001", "commute_date": "2026-09-23",
+             "walk_minutes": 5, "transit_minutes": 10},
+            {"source": "streeteasy", "source_id": "new", "address": "1 Main St #2A",
+             "building_bbl": "1000000001", "commute_date": None,
+             "walk_minutes": None, "transit_minutes": None},
+            {"source": "streeteasy", "source_id": "new-2", "address": "2 Main St #1A",
+             "building_bbl": "1000000002", "commute_date": None,
+             "walk_minutes": None, "transit_minutes": None},
+            {"source": "streeteasy", "source_id": "new-3", "address": "3 Main St #1A",
+             "building_bbl": "1000000003", "commute_date": None,
+             "walk_minutes": None, "transit_minutes": None},
+        ]
+
+        class Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def execute(self, query, *_):
+                if "FROM listings" in query:
+                    return mock.Mock(fetchall=lambda: rows)
+                return []
+
+            def commit(self):
+                pass
+
+        lock = threading.Lock()
+        active = maximum = 0
+
+        def route(*_args, **_kwargs):
+            nonlocal active, maximum
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+            return {}
+
+        with (
+            mock.patch.object(commute.db, "init"),
+            mock.patch.object(commute.db, "connect", return_value=Connection()),
+            mock.patch.object(commute.db, "upsert_commute") as save,
+            mock.patch.object(commute, "listing_coordinates", return_value=(40.7, -74.0)),
+            mock.patch.object(commute, "plan", side_effect=route) as plan,
+            mock.patch.object(commute, "route_minutes", return_value=(5, 10)),
+        ):
+            count = commute.calculate(source_ids={"new", "new-2", "new-3"})
+
+        self.assertEqual(count, 3)
+        self.assertEqual(
+            {call.args[2] for call in save.call_args_list},
+            {"new", "new-2", "new-3"},
+        )
+        self.assertEqual(plan.call_count, 2)
+        self.assertGreater(maximum, 1)
 if __name__ == "__main__":
     unittest.main()
