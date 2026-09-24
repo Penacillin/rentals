@@ -1,3 +1,4 @@
+from datetime import date, timedelta
 import sys
 import unittest
 from pathlib import Path
@@ -154,6 +155,11 @@ class ScraperParserTests(unittest.TestCase):
                 "elevator": True,
             },
         )
+
+    def test_streeteasy_days_on_market_becomes_listing_date(self):
+        _, _, _, listed_at = scrape.detail_metadata("<p>Days on market 2 days</p>")
+
+        self.assertEqual(listed_at, (date.today() - timedelta(days=2)).isoformat())
 
     def test_streeteasy_detail_metadata_is_unit_specific(self):
         rows = [

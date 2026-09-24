@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 from contextlib import contextmanager
+from datetime import date, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
@@ -80,7 +81,7 @@ def detail_metadata(html: str) -> tuple[int | None, dict[str, bool], int | None,
     days = re.search(r"\bDays on market\s+(\d+)\s+days?\b", text, re.I)
     history = text.split("Property history", 1)[-1]
     listed_date = re.search(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b", history)
-    listed = days.group(1) if days else listed_date.group(0) if listed_date else None
+    listed = (date.today() - timedelta(days=int(days.group(1)))).isoformat() if days else listed_date.group(0) if listed_date else None
     return built_year(text), {
         name: bool(re.search(pattern, text, re.I))
         for name, pattern in FEATURE_PATTERNS.items()
